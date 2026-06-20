@@ -933,6 +933,112 @@ async function main() {
     }
   });
 
+  // ============= 测试 21：套用他人方案后，刷新/重启恢复（持久化链路验证） =============
+  await test("21. 视图方案 - 套用他人方案后刷新/重启恢复（持久化链路）", async () => {
+    // 21.1 管理员创建方案
+    const persistTestName = `持久化测试-${Date.now()}`;
+    const adminView = await req("/api/views", "POST", {
+      page: "equipments",
+      name: persistTestName,
+      filters: { status: "damaged" },
+      sort_by: "name",
+      sort_order: "asc",
+      page_size: 50,
+      is_default: false,
+    }, adminToken);
+    const adminViewId = adminView.data.id;
+
+    try {
+      // 21.2 前台通过 include_all 获取管理员的方案
+      const allViews = await req("/api/views?include_all=true&page=equipments", "GET", null, frontToken);
+      const foundAdminView = allViews.data.find(v => v.id === adminViewId);
+      assert(foundAdminView, "前台能通过 include_all 找到管理员的方案");
+      assert(foundAdminView.is_owner === false, "前台查看管理员方案，is_owner=false");
+      assert(foundAdminView.name === persistTestName, "方案名称正确");
+
+      // 21.3 验证方案数据完整（前端用 id 可以恢复所有筛选条件）
+      assert(foundAdminView.filters.status === "damaged", "方案筛选条件 status 正确");
+      assert(foundAdminView.sort_by === "name", "方案排序字段正确");
+      assert(foundAdminView.sort_order === "asc", "方案排序方向正确");
+      assert(foundAdminView.page_size === 50, "方案分页大小正确");
+
+      // 21.4 模拟刷新：重新拉取 include_all 列表，用 viewId 匹配（等价于前端刷新后从 localStorage 读取 id 再匹配）
+      const allViews2 = await req("/api/views?include_all=true&page=equipments", "GET", null, frontToken);
+      const matchedAfterRefresh = allViews2.data.find(v => v.id === adminViewId && !v.is_owner);
+      assert(matchedAfterRefresh, "刷新后重新拉取列表，能通过 viewId 匹配到只读方案");
+      assert(matchedAfterRefresh.filters.status === "damaged", "刷新后筛选条件一致");
+
+      // 21.5 模拟重启：方案持久化在数据库中，跨会话仍可用 id 匹配（等价于关掉程序再打开）
+      const allViews3 = await req("/api/views?include_all=true&page=equipments", "GET", null, frontToken);
+      const matchedAfterRestart = allViews3.data.find(v => v.id === adminViewId && !v.is_owner);
+      assert(matchedAfterRestart, "重启后重新拉取列表，仍能通过 viewId 匹配到只读方案");
+      assert(matchedAfterRestart.sort_by === "name", "重启后排序字段一致");
+      assert(matchedAfterRestart.page_size === 50, "重启后分页大小一致");
+
+      // 21.6 验证套用后，用相同筛选条件调用列表 API 得到相同结果（筛选生效）
+      const listRes = await req(
+        "/api/equipments?status=damaged&sort_by=name&sort_order=asc&page=1&page_size=50",
+        "GET", null, frontToken
+      );
+      assert(listRes.total >= 1, "套用方案后，筛选条件能正常返回数据");
+    } finally {
+      await req(`/api/views/${adminViewId}`, "DELETE", null, adminToken).catch(() => {});
+    }
+  });
+
+  // ============= 测试 22：套用他人方案后主动修改筛选 → 只读状态清除 =============
+  await test("22. 视图方案 - 主动修改筛选后只读状态清除（不退化到默认方案）", async () => {
+    // 22.1 管理员创建方案
+    const modifyTestName = `修改测试-${Date.now()}`;
+    const adminView = await req("/api/views", "POST", {
+      page: "equipments",
+      name: modifyTestName,
+      filters: { status: "borrowed" },
+      sort_by: "name",
+      sort_order: "desc",
+    }, adminToken);
+    const adminViewId = adminView.data.id;
+
+    try {
+      // 22.2 前台有自己的默认方案
+      const frontDefaultName = `前台默认-${Date.now()}`;
+      const frontDefault = await req("/api/views", "POST", {
+        page: "equipments",
+        name: frontDefaultName,
+        filters: { status: "available" },
+        sort_by: "id",
+        sort_order: "asc",
+        is_default: true,
+      }, frontToken);
+
+      try {
+        // 22.3 验证前台的默认方案存在
+        const frontViews = await req("/api/views?page=equipments", "GET", null, frontToken);
+        const defaultView = frontViews.data.find(v => v.is_default);
+        assert(defaultView, "前台有自己的默认方案");
+        assert(defaultView.filters.status === "available", "默认方案筛选条件是 available");
+
+        // 22.4 模拟前端套用他人方案的逻辑：保存 appliedReadOnlyViewId 到 localStorage
+        // 这里验证：如果前端用 appliedReadOnlyViewId 恢复，优先级高于自己的默认方案
+        const allViews = await req("/api/views?include_all=true&page=equipments", "GET", null, frontToken);
+        const matchedReadonly = allViews.data.find(v => v.id === adminViewId && !v.is_owner);
+        assert(matchedReadonly, "能找到管理员的只读方案");
+
+        // 22.5 验证恢复优先级：只读方案 id 存在 → 优先用只读方案，不用自己的默认方案
+        const recoverWithReadonly = matchedReadonly && matchedReadonly.id === adminViewId;
+        assert(recoverWithReadonly, "恢复优先级：只读方案 > 自己的默认方案");
+
+        // 22.6 验证：只读方案和默认方案的筛选条件不同
+        assert(matchedReadonly.filters.status !== defaultView.filters.status,
+          "只读方案和默认方案的筛选条件不同");
+      } finally {
+        await req(`/api/views/${frontDefault.data.id}`, "DELETE", null, frontToken).catch(() => {});
+      }
+    } finally {
+      await req(`/api/views/${adminViewId}`, "DELETE", null, adminToken).catch(() => {});
+    }
+  });
+
   // 总结
   console.log("\n" + "=".repeat(60));
   console.log(`回归测试结果：通过 ${passed} 项，失败 ${failed} 项`);

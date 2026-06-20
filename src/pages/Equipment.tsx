@@ -102,6 +102,10 @@ export default function EquipmentPage() {
     "equipment_active_view_id",
     null
   );
+  const [appliedReadOnlyViewId, setAppliedReadOnlyViewId] = useLocalStorage<number | null>(
+    "equipment_applied_readonly_view_id",
+    null
+  );
   const [appliedReadOnlyView, setAppliedReadOnlyView] = useState<SavedView | null>(null);
   const [showViewDropdown, setShowViewDropdown] = useState(false);
   const [showSaveDialog, setShowSaveDialog] = useState(false);
@@ -165,6 +169,7 @@ export default function EquipmentPage() {
     setVisibleColumns(DEFAULT_VISIBLE_COLUMNS);
     setActiveViewId(null);
     setAppliedReadOnlyView(null);
+    setAppliedReadOnlyViewId(null);
   }, [
     setStatusFilter,
     setNameSearch,
@@ -176,6 +181,7 @@ export default function EquipmentPage() {
     setVisibleColumns,
     setActiveViewId,
     setAppliedReadOnlyView,
+    setAppliedReadOnlyViewId,
   ]);
 
   useEffect(() => {
@@ -186,6 +192,27 @@ export default function EquipmentPage() {
     const init = async () => {
       const views = await loadViews();
       if (cancelled || !views || views.length === 0) return;
+
+      if (appliedReadOnlyViewId) {
+        const matched = views.find((v) => v.id === appliedReadOnlyViewId && !v.is_owner);
+        if (matched) {
+          setStatusFilter(matched.filters.status || "");
+          setNameSearch(matched.filters.name || "");
+          setTypeFilter(matched.filters.type || "");
+          setSortBy(matched.sort_by);
+          setSortOrder(matched.sort_order || "desc");
+          setPageSize(matched.page_size || 20);
+          setCurrentPage(1);
+          if (matched.visible_columns && matched.visible_columns.length > 0) {
+            setVisibleColumns(matched.visible_columns);
+          } else {
+            setVisibleColumns(DEFAULT_VISIBLE_COLUMNS);
+          }
+          setAppliedReadOnlyView(matched);
+          setActiveViewId(null);
+          return;
+        }
+      }
 
       if (activeViewId) {
         const matched = views.find((v) => v.id === activeViewId && v.is_owner);
@@ -225,6 +252,7 @@ export default function EquipmentPage() {
       }
 
       setActiveViewId(null);
+      setAppliedReadOnlyViewId(null);
     };
 
     init();
@@ -320,6 +348,7 @@ export default function EquipmentPage() {
     }
     setActiveViewId(null);
     setAppliedReadOnlyView(null);
+    setAppliedReadOnlyViewId(null);
   };
 
   const handleSaveView = async () => {
@@ -349,6 +378,7 @@ export default function EquipmentPage() {
       setSaveAsDefault(false);
       setActiveViewId(newView.id);
       setAppliedReadOnlyView(null);
+      setAppliedReadOnlyViewId(null);
       await loadViews();
     } catch (err: unknown) {
       toast(err instanceof Error ? err.message : "保存失败", "error");
@@ -377,6 +407,7 @@ export default function EquipmentPage() {
       });
       toast("当前方案已更新", "success");
       setAppliedReadOnlyView(null);
+      setAppliedReadOnlyViewId(null);
       await loadViews();
     } catch (err: unknown) {
       toast(err instanceof Error ? err.message : "更新失败", "error");
@@ -397,6 +428,7 @@ export default function EquipmentPage() {
       }
       if (appliedReadOnlyView?.id === viewId) {
         setAppliedReadOnlyView(null);
+        setAppliedReadOnlyViewId(null);
       }
       await loadViews();
     } catch (err: unknown) {
@@ -411,10 +443,12 @@ export default function EquipmentPage() {
       if (view.is_owner) {
         setActiveViewId(view.id);
         setAppliedReadOnlyView(null);
+        setAppliedReadOnlyViewId(null);
         toast(`已应用方案「${view.name}」`, "success");
       } else {
         setActiveViewId(null);
         setAppliedReadOnlyView(view);
+        setAppliedReadOnlyViewId(view.id);
         toast(`已套用他人方案「${view.name}」（只读，如需保存请另存为新方案）`, "info");
       }
       setShowViewDropdown(false);
@@ -436,6 +470,7 @@ export default function EquipmentPage() {
     }
     setActiveViewId(null);
     setAppliedReadOnlyView(null);
+    setAppliedReadOnlyViewId(null);
   };
 
   const uniqueTypes = useMemo(
@@ -743,6 +778,7 @@ export default function EquipmentPage() {
                   setCurrentPage(1);
                   setActiveViewId(null);
                   setAppliedReadOnlyView(null);
+                  setAppliedReadOnlyViewId(null);
                 }}
                 className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
                   statusFilter === tab.value
@@ -766,6 +802,7 @@ export default function EquipmentPage() {
                   setCurrentPage(1);
                   setActiveViewId(null);
                   setAppliedReadOnlyView(null);
+                  setAppliedReadOnlyViewId(null);
                 }}
                 placeholder="搜索设备名称"
                 className="pl-8 pr-3 py-1.5 border border-gray-300 rounded-lg text-sm w-44"
