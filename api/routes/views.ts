@@ -19,13 +19,23 @@ function logViewOperation(
 
 router.get('/', authMiddleware, (req: Request, res: Response): void => {
   const userId = req.user!.id
-  const { page = 'equipments' } = req.query
+  const { page = 'equipments', include_all = 'false' } = req.query
 
-  const rows = db
-    .prepare('SELECT * FROM saved_views WHERE user_id = ? AND page = ? ORDER BY is_default DESC, created_at DESC')
-    .all(userId, page)
+  const includeAll = include_all === 'true'
 
-  const views = rows.map((r: Record<string, unknown>) => ({
+  let sql = 'SELECT * FROM saved_views WHERE page = ?'
+  const params: unknown[] = [page]
+
+  if (!includeAll) {
+    sql += ' AND user_id = ?'
+    params.push(userId)
+  }
+
+  sql += ' ORDER BY is_default DESC, created_at DESC'
+
+  const rows = db.prepare(sql).all(...params) as Record<string, unknown>[]
+
+  const views = rows.map((r) => ({
     id: r.id,
     user_id: r.user_id,
     page: r.page,
@@ -36,6 +46,7 @@ router.get('/', authMiddleware, (req: Request, res: Response): void => {
     page_size: r.page_size,
     visible_columns: r.visible_columns ? JSON.parse(String(r.visible_columns)) : null,
     is_default: r.is_default === 1,
+    is_owner: Number(r.user_id) === userId,
     created_at: r.created_at,
     updated_at: r.updated_at,
   }))

@@ -102,6 +102,7 @@ export default function EquipmentPage() {
     "equipment_active_view_id",
     null
   );
+  const [appliedReadOnlyView, setAppliedReadOnlyView] = useState<SavedView | null>(null);
   const [showViewDropdown, setShowViewDropdown] = useState(false);
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [showColumnMenu, setShowColumnMenu] = useState(false);
@@ -117,10 +118,12 @@ export default function EquipmentPage() {
   const loadViews = useCallback(async () => {
     if (!user) return;
     try {
-      const views = await api.getViews("equipments");
+      const views = await api.getViews("equipments", true);
       setSavedViews(views);
+      return views;
     } catch (err) {
-      // toast(err instanceof Error ? err.message : "加载视图方案失败", "error");
+      toast(err instanceof Error ? err.message : "加载视图方案失败", "error");
+      return [] as SavedView[];
     }
   }, [user]);
 
@@ -138,7 +141,6 @@ export default function EquipmentPage() {
       } else {
         setVisibleColumns(DEFAULT_VISIBLE_COLUMNS);
       }
-      setActiveViewId(view.id);
     },
     [
       setStatusFilter,
@@ -149,7 +151,6 @@ export default function EquipmentPage() {
       setPageSize,
       setCurrentPage,
       setVisibleColumns,
-      setActiveViewId,
     ]
   );
 
@@ -163,6 +164,7 @@ export default function EquipmentPage() {
     setCurrentPage(1);
     setVisibleColumns(DEFAULT_VISIBLE_COLUMNS);
     setActiveViewId(null);
+    setAppliedReadOnlyView(null);
   }, [
     setStatusFilter,
     setNameSearch,
@@ -173,30 +175,64 @@ export default function EquipmentPage() {
     setCurrentPage,
     setVisibleColumns,
     setActiveViewId,
+    setAppliedReadOnlyView,
   ]);
 
   useEffect(() => {
     if (!user) return;
-    loadViews().then(() => {
+
+    let cancelled = false;
+
+    const init = async () => {
+      const views = await loadViews();
+      if (cancelled || !views || views.length === 0) return;
+
       if (activeViewId) {
-        const matched = savedViews.find((v) => v.id === activeViewId);
+        const matched = views.find((v) => v.id === activeViewId && v.is_owner);
         if (matched) {
-          applyViewToState(matched);
+          setStatusFilter(matched.filters.status || "");
+          setNameSearch(matched.filters.name || "");
+          setTypeFilter(matched.filters.type || "");
+          setSortBy(matched.sort_by);
+          setSortOrder(matched.sort_order || "desc");
+          setPageSize(matched.page_size || 20);
+          setCurrentPage(1);
+          if (matched.visible_columns && matched.visible_columns.length > 0) {
+            setVisibleColumns(matched.visible_columns);
+          } else {
+            setVisibleColumns(DEFAULT_VISIBLE_COLUMNS);
+          }
           return;
         }
       }
-      const defaultView = savedViews.find((v) => v.is_default);
-      if (defaultView) {
-        applyViewToState(defaultView);
-      }
-    });
-  }, [user]);
 
-  useEffect(() => {
-    if (user) {
-      loadViews();
-    }
-  }, [user, loadViews]);
+      const defaultView = views.find((v) => v.is_default && v.is_owner);
+      if (defaultView) {
+        setStatusFilter(defaultView.filters.status || "");
+        setNameSearch(defaultView.filters.name || "");
+        setTypeFilter(defaultView.filters.type || "");
+        setSortBy(defaultView.sort_by);
+        setSortOrder(defaultView.sort_order || "desc");
+        setPageSize(defaultView.page_size || 20);
+        setCurrentPage(1);
+        if (defaultView.visible_columns && defaultView.visible_columns.length > 0) {
+          setVisibleColumns(defaultView.visible_columns);
+        } else {
+          setVisibleColumns(DEFAULT_VISIBLE_COLUMNS);
+        }
+        setActiveViewId(defaultView.id);
+        return;
+      }
+
+      setActiveViewId(null);
+    };
+
+    init();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
 
   const fetchEquipments = useCallback(async () => {
     setLoading(true);
@@ -283,6 +319,7 @@ export default function EquipmentPage() {
       setSortOrder("asc");
     }
     setActiveViewId(null);
+    setAppliedReadOnlyView(null);
   };
 
   const handleSaveView = async () => {
@@ -311,6 +348,7 @@ export default function EquipmentPage() {
       setSaveViewName("");
       setSaveAsDefault(false);
       setActiveViewId(newView.id);
+      setAppliedReadOnlyView(null);
       await loadViews();
     } catch (err: unknown) {
       toast(err instanceof Error ? err.message : "保存失败", "error");
@@ -319,6 +357,11 @@ export default function EquipmentPage() {
 
   const handleUpdateView = async () => {
     if (!activeViewId) return;
+    const activeView = savedViews.find((v) => v.id === activeViewId);
+    if (!activeView || !activeView.is_owner) {
+      toast("只能修改自己创建的方案", "error");
+      return;
+    }
     try {
       const filters: Record<string, string> = {};
       if (statusFilter) filters.status = statusFilter;
@@ -333,6 +376,7 @@ export default function EquipmentPage() {
         visible_columns: visibleColumns,
       });
       toast("当前方案已更新", "success");
+      setAppliedReadOnlyView(null);
       await loadViews();
     } catch (err: unknown) {
       toast(err instanceof Error ? err.message : "更新失败", "error");
@@ -340,11 +384,19 @@ export default function EquipmentPage() {
   };
 
   const handleDeleteView = async (viewId: number) => {
+    const view = savedViews.find((v) => v.id === viewId);
+    if (!view || !view.is_owner) {
+      toast("只能删除自己创建的方案", "error");
+      return;
+    }
     try {
       await api.deleteView(viewId);
       toast("方案已删除", "success");
       if (viewId === activeViewId) {
         resetToDefaultView();
+      }
+      if (appliedReadOnlyView?.id === viewId) {
+        setAppliedReadOnlyView(null);
       }
       await loadViews();
     } catch (err: unknown) {
@@ -356,6 +408,15 @@ export default function EquipmentPage() {
     try {
       await api.applyView(view.id);
       applyViewToState(view);
+      if (view.is_owner) {
+        setActiveViewId(view.id);
+        setAppliedReadOnlyView(null);
+        toast(`已应用方案「${view.name}」`, "success");
+      } else {
+        setActiveViewId(null);
+        setAppliedReadOnlyView(view);
+        toast(`已套用他人方案「${view.name}」（只读，如需保存请另存为新方案）`, "info");
+      }
       setShowViewDropdown(false);
     } catch (err: unknown) {
       toast(err instanceof Error ? err.message : "应用方案失败", "error");
@@ -368,11 +429,13 @@ export default function EquipmentPage() {
         setVisibleColumns(visibleColumns.filter((c) => c !== col));
       } else {
         toast("至少保留一列", "error");
+        return;
       }
     } else {
       setVisibleColumns([...visibleColumns, col]);
     }
     setActiveViewId(null);
+    setAppliedReadOnlyView(null);
   };
 
   const uniqueTypes = useMemo(
@@ -382,6 +445,14 @@ export default function EquipmentPage() {
 
   const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
   const activeView = savedViews.find((v) => v.id === activeViewId) || null;
+  const myViews = useMemo(
+    () => savedViews.filter((v) => v.is_owner),
+    [savedViews]
+  );
+  const otherViews = useMemo(
+    () => savedViews.filter((v) => !v.is_owner),
+    [savedViews]
+  );
 
   const getSortIcon = (col: string) => {
     if (sortBy !== col)
@@ -391,6 +462,28 @@ export default function EquipmentPage() {
     ) : (
       <ChevronDown className="w-3.5 h-3.5 text-teal-700" />
     );
+  };
+
+  const currentViewDisplay = () => {
+    if (activeView) {
+      return {
+        icon: <Bookmark className="w-4 h-4 text-teal-700" />,
+        text: activeView.name,
+        textClass: "text-teal-700 font-medium",
+      };
+    }
+    if (appliedReadOnlyView) {
+      return {
+        icon: <Bookmark className="w-4 h-4 text-gray-500" />,
+        text: `${appliedReadOnlyView.name}（只读）`,
+        textClass: "text-gray-600",
+      };
+    }
+    return {
+      icon: <BookmarkPlus className="w-4 h-4" />,
+      text: "视图方案",
+      textClass: "",
+    };
   };
 
   return (
@@ -412,15 +505,17 @@ export default function EquipmentPage() {
             >
               {activeView ? (
                 <>
-                  <Bookmark className="w-4 h-4 text-teal-700" />
-                  <span className="text-teal-700 font-medium">
-                    {activeView.name}
+                  {currentViewDisplay().icon}
+                  <span className={currentViewDisplay().textClass}>
+                    {currentViewDisplay().text}
                   </span>
                 </>
               ) : (
                 <>
-                  <BookmarkPlus className="w-4 h-4" />
-                  <span>视图方案</span>
+                  {currentViewDisplay().icon}
+                  <span className={currentViewDisplay().textClass}>
+                    {currentViewDisplay().text}
+                  </span>
                 </>
               )}
               <ChevronDown className="w-4 h-4" />
@@ -439,7 +534,7 @@ export default function EquipmentPage() {
                         setShowViewDropdown(false);
                       }}
                       className={`w-full text-left px-2 py-1.5 rounded text-sm flex items-center gap-2 ${
-                        !activeViewId
+                        !activeViewId && !appliedReadOnlyView
                           ? "bg-teal-50 text-teal-700 font-medium"
                           : "text-gray-700 hover:bg-gray-50"
                       }`}
@@ -448,45 +543,45 @@ export default function EquipmentPage() {
                       默认视图
                     </button>
                   </div>
-                  {savedViews.length > 0 && (
-                    <div className="max-h-60 overflow-y-auto">
-                      {savedViews.map((view) => (
-                        <div
-                          key={view.id}
-                          className={`px-3 py-2 flex items-center justify-between group ${
-                            view.id === activeViewId ? "bg-teal-50" : "hover:bg-gray-50"
-                          }`}
-                        >
-                          <button
-                            onClick={() => handleApplyView(view)}
-                            className="flex-1 text-left flex items-center gap-1.5"
+                  <div className="max-h-60 overflow-y-auto">
+                    {myViews.length > 0 && (
+                      <div>
+                        <div className="px-3 py-1.5 text-xs font-medium text-gray-400 uppercase tracking-wider">
+                          我的方案
+                        </div>
+                        {myViews.map((view) => (
+                          <div
+                            key={view.id}
+                            className={`px-3 py-2 flex items-center justify-between group ${
+                              view.id === activeViewId ? "bg-teal-50" : "hover:bg-gray-50"
+                            }`}
                           >
-                            <Bookmark
-                              className={`w-4 h-4 ${
-                                view.id === activeViewId
-                                  ? "text-teal-700"
-                                  : "text-gray-400"
-                              }`}
-                            />
-                            <span
-                              className={`text-sm ${
-                                view.id === activeViewId
-                                  ? "text-teal-700 font-medium"
-                                  : "text-gray-700"
-                              }`}
+                            <button
+                              onClick={() => handleApplyView(view)}
+                              className="flex-1 text-left flex items-center gap-1.5"
                             >
-                              {view.name}
-                            </span>
-                            {view.is_default && (
-                              <span className="text-xs text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">
-                                默认
+                              <Bookmark
+                                className={`w-4 h-4 ${
+                                  view.id === activeViewId
+                                    ? "text-teal-700"
+                                    : "text-gray-400"
+                                }`}
+                              />
+                              <span
+                                className={`text-sm ${
+                                  view.id === activeViewId
+                                    ? "text-teal-700 font-medium"
+                                    : "text-gray-700"
+                                }`}
+                              >
+                                {view.name}
                               </span>
-                            )}
-                            {view.user_id !== user?.id && (
-                              <span className="text-xs text-gray-400">只读</span>
-                            )}
-                          </button>
-                          {view.user_id === user?.id && (
+                              {view.is_default && (
+                                <span className="text-xs text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">
+                                  默认
+                                </span>
+                              )}
+                            </button>
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
@@ -501,11 +596,49 @@ export default function EquipmentPage() {
                             >
                               <Trash2 className="w-3.5 h-3.5" />
                             </button>
-                          )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {otherViews.length > 0 && (
+                      <div className={myViews.length > 0 ? "border-t border-gray-100" : ""}>
+                        <div className="px-3 py-1.5 text-xs font-medium text-gray-400 uppercase tracking-wider">
+                          可套用方案
                         </div>
-                      ))}
-                    </div>
-                  )}
+                        {otherViews.map((view) => (
+                          <div
+                            key={view.id}
+                            className={`px-3 py-2 flex items-center justify-between group ${
+                              appliedReadOnlyView?.id === view.id ? "bg-gray-100" : "hover:bg-gray-50"
+                            }`}
+                          >
+                            <button
+                              onClick={() => handleApplyView(view)}
+                              className="flex-1 text-left flex items-center gap-1.5"
+                            >
+                              <Bookmark
+                                className={`w-4 h-4 ${
+                                  appliedReadOnlyView?.id === view.id
+                                    ? "text-gray-600"
+                                    : "text-gray-400"
+                                }`}
+                              />
+                              <span
+                                className={`text-sm ${
+                                  appliedReadOnlyView?.id === view.id
+                                    ? "text-gray-700 font-medium"
+                                    : "text-gray-700"
+                                }`}
+                              >
+                                {view.name}
+                              </span>
+                              <span className="text-xs text-gray-400">只读</span>
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                   <div className="border-t border-gray-100 px-3 py-2 space-y-1">
                     <button
                       onClick={() => {
@@ -517,7 +650,7 @@ export default function EquipmentPage() {
                       <Save className="w-4 h-4" />
                       另存为新方案...
                     </button>
-                    {activeView && activeView.user_id === user?.id && (
+                    {activeView && activeView.is_owner && (
                       <button
                         onClick={() => {
                           handleUpdateView();
@@ -528,6 +661,11 @@ export default function EquipmentPage() {
                         <Check className="w-4 h-4" />
                         更新当前方案
                       </button>
+                    )}
+                    {appliedReadOnlyView && (
+                      <div className="px-2 py-1.5 text-xs text-gray-500 bg-gray-50 rounded">
+                        已套用只读方案，修改后请「另存为新方案」
+                      </div>
                     )}
                   </div>
                 </div>
@@ -604,6 +742,7 @@ export default function EquipmentPage() {
                   setStatusFilter(tab.value);
                   setCurrentPage(1);
                   setActiveViewId(null);
+                  setAppliedReadOnlyView(null);
                 }}
                 className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
                   statusFilter === tab.value
@@ -626,6 +765,7 @@ export default function EquipmentPage() {
                   setNameSearch(e.target.value);
                   setCurrentPage(1);
                   setActiveViewId(null);
+                  setAppliedReadOnlyView(null);
                 }}
                 placeholder="搜索设备名称"
                 className="pl-8 pr-3 py-1.5 border border-gray-300 rounded-lg text-sm w-44"
@@ -637,6 +777,7 @@ export default function EquipmentPage() {
                 setTypeFilter(e.target.value);
                 setCurrentPage(1);
                 setActiveViewId(null);
+                setAppliedReadOnlyView(null);
               }}
               className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm bg-white"
             >
@@ -805,6 +946,7 @@ export default function EquipmentPage() {
                 setPageSize(Number(e.target.value));
                 setCurrentPage(1);
                 setActiveViewId(null);
+                setAppliedReadOnlyView(null);
               }}
               className="px-2 py-1 border border-gray-300 rounded text-sm bg-white"
             >

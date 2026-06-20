@@ -697,6 +697,242 @@ async function main() {
     assert(actions.includes("delete"), "操作日志包含 delete");
   });
 
+  // ============= 测试 16：include_all 参数与 is_owner 标识 =============
+  await test("16. 视图方案 - include_all 返回所有可套用方案，is_owner 正确标识", async () => {
+    // 16.1 管理员创建一个方案
+    const adminViewName = `管理员方案-${Date.now()}`;
+    const adminCreate = await req("/api/views", "POST", {
+      page: "equipments",
+      name: adminViewName,
+      filters: { status: "available" },
+    }, adminToken);
+    const adminViewId = adminCreate.data.id;
+
+    try {
+      // 16.2 管理员调用 include_all=true，应看到自己的方案，is_owner=true
+      const adminAll = await req("/api/views?include_all=true", "GET", null, adminToken);
+      const adminOwnView = adminAll.data.find(v => v.id === adminViewId);
+      assert(adminOwnView !== undefined, "管理员能看到自己创建的方案");
+      assert(adminOwnView.is_owner === true, "管理员查看自己的方案，is_owner=true");
+
+      // 16.3 前台调用 include_all=true，应看到管理员的方案，is_owner=false
+      const frontAll = await req("/api/views?include_all=true", "GET", null, frontToken);
+      const frontSeeAdminView = frontAll.data.find(v => v.id === adminViewId);
+      assert(frontSeeAdminView !== undefined, "前台能看到管理员创建的可套用方案");
+      assert(frontSeeAdminView.is_owner === false, "前台查看管理员的方案，is_owner=false");
+
+      // 16.4 前台调用 include_all=false（默认），不应看到管理员的方案
+      const frontMine = await req("/api/views", "GET", null, frontToken);
+      const frontNotSeeAdmin = frontMine.data.find(v => v.id === adminViewId);
+      assert(frontNotSeeAdmin === undefined, "前台默认只看自己的方案，看不到管理员的");
+    } finally {
+      // 清理
+      await req(`/api/views/${adminViewId}`, "DELETE", null, adminToken).catch(() => {});
+    }
+  });
+
+  // ============= 测试 17：复现闭包陷阱 - 刷新恢复已修复 =============
+  await test("17. 视图方案 - 刷新恢复已修复（验证闭包陷阱）", async () => {
+    // 17.1 前台创建一个方案并设为默认
+    const frontViewName = `前台默认-${Date.now()}`;
+    const frontCreate = await req("/api/views", "POST", {
+      page: "equipments",
+      name: frontViewName,
+      filters: { status: "borrowed" },
+      sort_by: "name",
+      sort_order: "asc",
+      page_size: 10,
+      is_default: true,
+    }, frontToken);
+    const frontViewId = frontCreate.data.id;
+
+    try {
+      // 17.2 模拟刷新页面：重新调用 include_all=true 拿所有方案
+      // 修复前：闭包中 savedViews 是空数组，永远找不到
+      // 修复后：直接用返回的 views 数组匹配，应该能找到
+      const viewsAfterRefresh = await req("/api/views?include_all=true", "GET", null, frontToken);
+      const matchedById = viewsAfterRefresh.data.find(v => v.id === frontViewId && v.is_owner);
+      assert(matchedById !== undefined, "通过 activeViewId 能找到自己的方案（刷新恢复）");
+      assert(matchedById.filters.status === "borrowed", "恢复后 filters.status 正确");
+      assert(matchedById.sort_by === "name", "恢复后 sort_by 正确");
+      assert(matchedById.page_size === 10, "恢复后 page_size 正确");
+
+      // 17.3 通过 is_default 找默认方案
+      const defaultView = viewsAfterRefresh.data.find(v => v.is_default && v.is_owner);
+      assert(defaultView !== undefined, "能找到默认方案（重启恢复）");
+      assert(defaultView.id === frontViewId, "默认方案就是刚创建的那个");
+    } finally {
+      // 清理：取消默认
+      await req(`/api/views/${frontViewId}`, "PUT", { is_default: false }, frontToken).catch(() => {});
+      await req(`/api/views/${frontViewId}`, "DELETE", null, frontToken).catch(() => {});
+    }
+  });
+
+  // ============= 测试 18：跨用户方案套用 - 可套用不可修改 =============
+  await test("18. 视图方案 - 跨用户套用：可套用但不可修改/删除", async () => {
+    // 18.1 管理员创建一个方案
+    const sharedViewName = `共享方案-${Date.now()}`;
+    const adminCreate = await req("/api/views", "POST", {
+      page: "equipments",
+      name: sharedViewName,
+      filters: { status: "damaged" },
+      sort_by: "deposit_amount",
+      sort_order: "desc",
+    }, adminToken);
+    const sharedViewId = adminCreate.data.id;
+
+    try {
+      // 18.2 前台可以 apply 这个方案（记录日志）
+      const applyRes = await req(`/api/views/${sharedViewId}/apply`, "POST", {}, frontToken);
+      assert(applyRes.success === true, "前台可以成功套用管理员的方案");
+
+      // 18.3 前台尝试 update 管理员的方案 → 403
+      let caughtUpdate = false;
+      try {
+        await req(`/api/views/${sharedViewId}`, "PUT", { filters: { status: "available" } }, frontToken);
+      } catch (e) {
+        caughtUpdate = true;
+        assert(e.status === 403, "前台修改管理员方案返回 403");
+      }
+      assert(caughtUpdate, "前台修改管理员方案被拦截");
+
+      // 18.4 前台尝试 delete 管理员的方案 → 403
+      let caughtDelete = false;
+      try {
+        await req(`/api/views/${sharedViewId}`, "DELETE", null, frontToken);
+      } catch (e) {
+        caughtDelete = true;
+        assert(e.status === 403, "前台删除管理员方案返回 403");
+      }
+      assert(caughtDelete, "前台删除管理员方案被拦截");
+
+      // 18.5 前台套用后可以自己另存为新方案
+      const savedByFront = await req("/api/views", "POST", {
+        page: "equipments",
+        name: `套用后另存-${Date.now()}`,
+        filters: { status: "damaged" },
+        sort_by: "deposit_amount",
+        sort_order: "desc",
+      }, frontToken);
+      assert(savedByFront.success === true, "前台套用后可以另存为自己的新方案");
+
+      // 18.6 前台自己的方案可以正常更新和删除
+      const updateOwn = await req(`/api/views/${savedByFront.data.id}`, "PUT", {
+        filters: { status: "borrowed" }
+      }, frontToken);
+      assert(updateOwn.success === true, "前台可以更新自己的方案");
+
+      await req(`/api/views/${savedByFront.data.id}`, "DELETE", null, frontToken);
+
+      // 18.7 验证 apply 日志记录了前台套用管理员方案
+      const logs = await req("/api/views/logs?limit=20", "GET", null, frontToken);
+      const applyLog = logs.data.find(l => l.view_name === sharedViewName && l.action === "apply");
+      assert(applyLog !== undefined, "前台套用管理员方案的 apply 操作已记录到日志");
+    } finally {
+      // 清理管理员的方案
+      await req(`/api/views/${sharedViewId}`, "DELETE", null, adminToken).catch(() => {});
+    }
+  });
+
+  // ============= 测试 19：同名冲突 + 删除当前方案回退 =============
+  await test("19. 视图方案 - 同名冲突拦截、删除回退默认视图", async () => {
+    const dupName = `同名测试-${Date.now()}`;
+
+    // 19.1 创建第一个方案
+    const v1 = await req("/api/views", "POST", {
+      page: "equipments",
+      name: dupName,
+      filters: { status: "available" },
+    }, adminToken);
+
+    // 19.2 同名创建 → 409
+    let caughtDup = false;
+    try {
+      await req("/api/views", "POST", {
+        page: "equipments",
+        name: dupName,
+        filters: { status: "borrowed" },
+      }, adminToken);
+    } catch (e) {
+      caughtDup = true;
+      assert(e.status === 409, "同名方案返回 409 Conflict");
+      assert(e.body.error.includes(dupName), "错误信息包含方案名");
+    }
+    assert(caughtDup, "同名方案创建被拦截");
+
+    // 19.3 删除后可以重新创建同名
+    await req(`/api/views/${v1.data.id}`, "DELETE", null, adminToken);
+    const v2 = await req("/api/views", "POST", {
+      page: "equipments",
+      name: dupName,
+      filters: { status: "borrowed" },
+    }, adminToken);
+    assert(v2.success === true, "删除原方案后可以重新创建同名方案");
+
+    // 19.4 删除当前使用的方案 → 前端应该收到删除成功，后面由前端处理回退
+    const delRes = await req(`/api/views/${v2.data.id}`, "DELETE", null, adminToken);
+    assert(delRes.success === true, "删除当前方案返回成功，由前端回退到默认视图");
+
+    // 19.5 验证方案列表为空
+    const viewsAfterDel = await req("/api/views", "GET", null, adminToken);
+    const notFound = viewsAfterDel.data.find(v => v.name === dupName);
+    assert(notFound === undefined, "方案已成功删除");
+  });
+
+  // ============= 测试 20：导出一致 - 套用他人方案后导出参数一致 =============
+  await test("20. 视图方案 - 套用他人方案后，导出与列表完全一致", async () => {
+    // 20.1 管理员创建带排序的方案
+    const exportTestName = `导出测试-${Date.now()}`;
+    const adminView = await req("/api/views", "POST", {
+      page: "equipments",
+      name: exportTestName,
+      filters: { status: "available" },
+      sort_by: "deposit_amount",
+      sort_order: "desc",
+    }, adminToken);
+
+    try {
+      // 20.2 前台不能导出（权限限制，正确行为）
+      let frontExportForbidden = false;
+      try {
+        await req(
+          "/api/export/equipments?status=available&sort_by=deposit_amount&sort_order=desc",
+          "GET", null, frontToken
+        );
+      } catch (e) {
+        frontExportForbidden = true;
+        assert(e.status === 403, "前台不能导出设备数据，返回 403");
+      }
+      assert(frontExportForbidden, "前台无导出权限，正确拦截");
+
+      // 20.3 管理员自己套用后，用相同参数调用列表和导出
+      const listRes = await req(
+        "/api/equipments?status=available&sort_by=deposit_amount&sort_order=desc&page=1&page_size=100",
+        "GET", null, adminToken
+      );
+      const csvRes = await req(
+        "/api/export/equipments?status=available&sort_by=deposit_amount&sort_order=desc",
+        "GET", null, adminToken
+      );
+
+      // 20.4 数量一致
+      const csvLines = csvRes.trim().split("\n").filter(l => l.trim());
+      const dataLines = csvLines.length - 1; // 去掉表头
+      assert(listRes.total === dataLines, `列表 total=${listRes.total} = CSV 数据行数=${dataLines}`);
+
+      // 20.5 排序一致（降序，第一行押金 >= 第二行）
+      const firstDataLine = csvLines[1];
+      const secondDataLine = csvLines[2];
+      if (firstDataLine && secondDataLine) {
+        const firstDeposit = parseFloat(firstDataLine.split(",")[3].replace(/"/g, ''));
+        const secondDeposit = parseFloat(secondDataLine.split(",")[3].replace(/"/g, ''));
+        assert(firstDeposit >= secondDeposit, `CSV 降序正确：第一行押金 ${firstDeposit} >= 第二行 ${secondDeposit}`);
+      }
+    } finally {
+      await req(`/api/views/${adminView.data.id}`, "DELETE", null, adminToken).catch(() => {});
+    }
+  });
+
   // 总结
   console.log("\n" + "=".repeat(60));
   console.log(`回归测试结果：通过 ${passed} 项，失败 ${failed} 项`);

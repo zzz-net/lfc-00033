@@ -84,6 +84,7 @@ export interface SavedView {
   page_size: number;
   visible_columns: string[] | null;
   is_default: boolean;
+  is_owner?: boolean;
   created_at: string;
   updated_at: string;
 }

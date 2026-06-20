@@ -47,6 +47,9 @@ async function request<T>(
   }
 
   if (body.success !== undefined && body.data !== undefined) {
+    if (body.total !== undefined) {
+      return body as T;
+    }
     return body.data as T;
   }
   if (body.success !== undefined) {
@@ -203,9 +206,10 @@ export const api = {
   exportDeposits: (params?: { borrower_name?: string; equipment_name?: string; type?: string }) =>
     downloadFile("/export/deposits", "押金流水.csv", params as Record<string, string>),
 
-  getViews: (page: string = "equipments") => {
+  getViews: (page: string = "equipments", includeAll: boolean = false) => {
     const qs = new URLSearchParams();
     qs.set("page", page);
+    if (includeAll) qs.set("include_all", "true");
     return request<SavedView[]>(`/views?${qs.toString()}`);
   },
 
