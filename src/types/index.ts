@@ -85,19 +85,52 @@ export interface SavedView {
   visible_columns: string[] | null;
   is_default: boolean;
   is_owner?: boolean;
+  version: number;
   created_at: string;
   updated_at: string;
+}
+
+export interface ViewSnapshot {
+  id: number;
+  view_id: number;
+  view_name: string;
+  version: number;
+  filters: SavedViewFilters;
+  sort_by: string | null;
+  sort_order: "asc" | "desc" | null;
+  page_size: number;
+  visible_columns: string[] | null;
+  is_default: boolean;
+  operator_id: number;
+  operator_name: string;
+  remark: string;
+  created_at: string;
 }
 
 export interface ViewOperationLog {
   id: number;
   view_id: number | null;
   view_name: string;
-  action: "create" | "update" | "delete" | "apply";
+  action: "create" | "update" | "delete" | "apply" | "snapshot" | "rollback" | "conflict";
   operator_id: number;
   operator_name: string;
   detail: string;
   created_at: string;
+}
+
+export interface ViewConflictError {
+  success: false;
+  error: string;
+  conflict: {
+    current_version: number;
+    submitted_version: number;
+    latest_version: number;
+    latest_updated_at: string;
+    latest_operator: {
+      operator_id: number;
+      operator_name: string;
+    };
+  };
 }
 
 export interface PaginatedEquipments {

@@ -89,16 +89,36 @@ db.exec(`
     page_size INTEGER DEFAULT 20,
     visible_columns TEXT,
     is_default INTEGER NOT NULL DEFAULT 0,
+    version INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
     UNIQUE(user_id, page, name)
   );
 
+  CREATE TABLE IF NOT EXISTS view_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    view_id INTEGER NOT NULL REFERENCES saved_views(id),
+    view_name TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    filters TEXT NOT NULL,
+    sort_by TEXT,
+    sort_order TEXT CHECK(sort_order IN ('asc', 'desc')),
+    page_size INTEGER DEFAULT 20,
+    visible_columns TEXT,
+    is_default INTEGER NOT NULL DEFAULT 0,
+    operator_id INTEGER NOT NULL REFERENCES users(id),
+    operator_name TEXT NOT NULL,
+    remark TEXT DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_view_snapshots_view_id ON view_snapshots(view_id);
+
   CREATE TABLE IF NOT EXISTS view_operation_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     view_id INTEGER REFERENCES saved_views(id),
     view_name TEXT NOT NULL,
-    action TEXT NOT NULL CHECK(action IN ('create', 'update', 'delete', 'apply')),
+    action TEXT NOT NULL CHECK(action IN ('create', 'update', 'delete', 'apply', 'snapshot', 'rollback', 'conflict')),
     operator_id INTEGER NOT NULL REFERENCES users(id),
     operator_name TEXT NOT NULL,
     detail TEXT DEFAULT '',
@@ -129,4 +149,73 @@ if (equipCount.count === 0) {
   insertEquip.run('血压计-001', '血压计', 100)
 }
 
+const columns = db.prepare("PRAGMA table_info(saved_views)").all() as { name: string }[]
+const hasVersion = columns.some((c) => c.name === 'version')
+if (!hasVersion) {
+  db.prepare('ALTER TABLE saved_views ADD COLUMN version INTEGER NOT NULL DEFAULT 1').run()
+}
+
+const hasSnapshots = db.prepare(
+  "SELECT name FROM sqlite_master WHERE type='table' AND name='view_snapshots'"
+).get() as { name: string } | undefined
+if (!hasSnapshots) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS view_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      view_id INTEGER NOT NULL REFERENCES saved_views(id),
+      view_name TEXT NOT NULL,
+      version INTEGER NOT NULL,
+      filters TEXT NOT NULL,
+      sort_by TEXT,
+      sort_order TEXT CHECK(sort_order IN ('asc', 'desc')),
+      page_size INTEGER DEFAULT 20,
+      visible_columns TEXT,
+      is_default INTEGER NOT NULL DEFAULT 0,
+      operator_id INTEGER NOT NULL REFERENCES users(id),
+      operator_name TEXT NOT NULL,
+      remark TEXT DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_view_snapshots_view_id ON view_snapshots(view_id);
+  `)
+}
+
+const logCount = db.prepare('SELECT COUNT(*) as count FROM view_operation_logs').get() as { count: number }
+const testLogStmt = db.prepare(`
+  INSERT INTO view_operation_logs (view_id, view_name, action, operator_id, operator_name, detail)
+  VALUES (NULL, '__migration_test__', 'snapshot', 1, 'migration', 'test')
+`)
+let needMigrateLogs = false
+try {
+  const info = db.pragma('foreign_keys = OFF', { simple: true })
+  const tx = db.transaction(() => {
+    testLogStmt.run()
+    db.prepare("DELETE FROM view_operation_logs WHERE view_name = '__migration_test__'").run()
+  })
+  tx()
+} catch {
+  needMigrateLogs = true
+}
+if (needMigrateLogs) {
+  const tx = db.transaction(() => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS view_operation_logs_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        view_id INTEGER REFERENCES saved_views(id),
+        view_name TEXT NOT NULL,
+        action TEXT NOT NULL CHECK(action IN ('create', 'update', 'delete', 'apply', 'snapshot', 'rollback', 'conflict')),
+        operator_id INTEGER NOT NULL REFERENCES users(id),
+        operator_name TEXT NOT NULL,
+        detail TEXT DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+      );
+      INSERT INTO view_operation_logs_new SELECT * FROM view_operation_logs;
+      DROP TABLE view_operation_logs;
+      ALTER TABLE view_operation_logs_new RENAME TO view_operation_logs;
+    `)
+  })
+  tx()
+}
+
 export default db
+ 

@@ -6,6 +6,7 @@ import type {
   BorrowRecord,
   DepositTransaction,
   SavedView,
+  ViewSnapshot,
   ViewOperationLog,
   PaginatedEquipments,
 } from "@/types";
@@ -238,9 +239,11 @@ export const api = {
       page_size?: number;
       visible_columns?: string[] | null;
       is_default?: boolean;
+      expected_version?: number;
+      snapshot_remark?: string;
     }
   ) =>
-    request<SavedView>(`/views/${id}`, {
+    request<{ data: SavedView; snapshot_created?: number }>(`/views/${id}`, {
       method: "PUT",
       body: JSON.stringify(data),
     }),
@@ -254,6 +257,23 @@ export const api = {
     request<SavedView>(`/views/${id}/apply`, {
       method: "POST",
     }),
+
+  getViewSnapshots: (viewId: number) =>
+    request<ViewSnapshot[]>(`/views/${viewId}/snapshots`, {
+      method: "GET",
+    }),
+
+  createViewSnapshot: (viewId: number, remark?: string) =>
+    request<ViewSnapshot>(`/views/${viewId}/snapshot`, {
+      method: "POST",
+      body: JSON.stringify({ remark }),
+    }),
+
+  rollbackView: (viewId: number, snapshotId: number) =>
+    request<{ data: SavedView; rollback_from_snapshot: number }>(
+      `/views/${viewId}/rollback/${snapshotId}`,
+      { method: "POST" }
+    ),
 
   getViewLogs: (limit?: number) => {
     const qs = new URLSearchParams();

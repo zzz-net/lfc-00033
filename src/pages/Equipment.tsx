@@ -16,6 +16,11 @@ import {
   X,
   Check,
   ArrowUpDown,
+  History,
+  Camera,
+  AlertTriangle,
+  Clock,
+  User,
 } from "lucide-react";
 import { api } from "@/utils/api";
 import { useAuthStore } from "@/store/authStore";
@@ -26,7 +31,7 @@ import {
   EQUIPMENT_STATUS_COLORS,
 } from "@/utils/helpers";
 import { useLocalStorage } from "@/hooks/useLocalStorage";
-import type { Equipment, SavedView } from "@/types";
+import type { Equipment, SavedView, ViewSnapshot } from "@/types";
 import EquipmentModal from "@/components/EquipmentModal";
 import EquipmentDetailDrawer from "@/components/EquipmentDetailDrawer";
 
@@ -107,11 +112,23 @@ export default function EquipmentPage() {
     null
   );
   const [appliedReadOnlyView, setAppliedReadOnlyView] = useState<SavedView | null>(null);
+  const [activeViewVersion, setActiveViewVersion] = useLocalStorage<number | null>(
+    "equipment_active_view_version",
+    null
+  );
   const [showViewDropdown, setShowViewDropdown] = useState(false);
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [showColumnMenu, setShowColumnMenu] = useState(false);
+  const [showSnapshotDialog, setShowSnapshotDialog] = useState(false);
+  const [showUpdateRemarkDialog, setShowUpdateRemarkDialog] = useState(false);
+  const [showConflictDialog, setShowConflictDialog] = useState(false);
+  const [conflictInfo, setConflictInfo] = useState<any>(null);
   const [saveViewName, setSaveViewName] = useState("");
   const [saveAsDefault, setSaveAsDefault] = useState(false);
+  const [updateRemark, setUpdateRemark] = useState("");
+  const [snapshots, setSnapshots] = useState<ViewSnapshot[]>([]);
+  const [snapshotsLoading, setSnapshotsLoading] = useState(false);
+  const [snapshotTargetView, setSnapshotTargetView] = useState<SavedView | null>(null);
 
   const [showModal, setShowModal] = useState(false);
   const [editItem, setEditItem] = useState<Equipment | null>(null);
@@ -170,6 +187,7 @@ export default function EquipmentPage() {
     setActiveViewId(null);
     setAppliedReadOnlyView(null);
     setAppliedReadOnlyViewId(null);
+    setActiveViewVersion(null);
   }, [
     setStatusFilter,
     setNameSearch,
@@ -182,6 +200,7 @@ export default function EquipmentPage() {
     setActiveViewId,
     setAppliedReadOnlyView,
     setAppliedReadOnlyViewId,
+    setActiveViewVersion,
   ]);
 
   useEffect(() => {
@@ -196,20 +215,10 @@ export default function EquipmentPage() {
       if (appliedReadOnlyViewId) {
         const matched = views.find((v) => v.id === appliedReadOnlyViewId && !v.is_owner);
         if (matched) {
-          setStatusFilter(matched.filters.status || "");
-          setNameSearch(matched.filters.name || "");
-          setTypeFilter(matched.filters.type || "");
-          setSortBy(matched.sort_by);
-          setSortOrder(matched.sort_order || "desc");
-          setPageSize(matched.page_size || 20);
-          setCurrentPage(1);
-          if (matched.visible_columns && matched.visible_columns.length > 0) {
-            setVisibleColumns(matched.visible_columns);
-          } else {
-            setVisibleColumns(DEFAULT_VISIBLE_COLUMNS);
-          }
+          applyViewToState(matched);
           setAppliedReadOnlyView(matched);
           setActiveViewId(null);
+          setActiveViewVersion(null);
           return;
         }
       }
@@ -217,42 +226,23 @@ export default function EquipmentPage() {
       if (activeViewId) {
         const matched = views.find((v) => v.id === activeViewId && v.is_owner);
         if (matched) {
-          setStatusFilter(matched.filters.status || "");
-          setNameSearch(matched.filters.name || "");
-          setTypeFilter(matched.filters.type || "");
-          setSortBy(matched.sort_by);
-          setSortOrder(matched.sort_order || "desc");
-          setPageSize(matched.page_size || 20);
-          setCurrentPage(1);
-          if (matched.visible_columns && matched.visible_columns.length > 0) {
-            setVisibleColumns(matched.visible_columns);
-          } else {
-            setVisibleColumns(DEFAULT_VISIBLE_COLUMNS);
-          }
+          applyViewToState(matched);
+          setActiveViewVersion(matched.version);
           return;
         }
       }
 
       const defaultView = views.find((v) => v.is_default && v.is_owner);
       if (defaultView) {
-        setStatusFilter(defaultView.filters.status || "");
-        setNameSearch(defaultView.filters.name || "");
-        setTypeFilter(defaultView.filters.type || "");
-        setSortBy(defaultView.sort_by);
-        setSortOrder(defaultView.sort_order || "desc");
-        setPageSize(defaultView.page_size || 20);
-        setCurrentPage(1);
-        if (defaultView.visible_columns && defaultView.visible_columns.length > 0) {
-          setVisibleColumns(defaultView.visible_columns);
-        } else {
-          setVisibleColumns(DEFAULT_VISIBLE_COLUMNS);
-        }
+        applyViewToState(defaultView);
         setActiveViewId(defaultView.id);
+        setActiveViewVersion(defaultView.version);
         return;
       }
 
       setActiveViewId(null);
       setAppliedReadOnlyViewId(null);
+      setActiveViewVersion(null);
     };
 
     init();
@@ -260,7 +250,7 @@ export default function EquipmentPage() {
     return () => {
       cancelled = true;
     };
-  }, [user]);
+  }, [user, loadViews, applyViewToState, activeViewId, appliedReadOnlyViewId]);
 
   const fetchEquipments = useCallback(async () => {
     setLoading(true);
@@ -349,6 +339,7 @@ export default function EquipmentPage() {
     setActiveViewId(null);
     setAppliedReadOnlyView(null);
     setAppliedReadOnlyViewId(null);
+    setActiveViewVersion(null);
   };
 
   const handleSaveView = async () => {
@@ -377,6 +368,7 @@ export default function EquipmentPage() {
       setSaveViewName("");
       setSaveAsDefault(false);
       setActiveViewId(newView.id);
+      setActiveViewVersion(newView.version);
       setAppliedReadOnlyView(null);
       setAppliedReadOnlyViewId(null);
       await loadViews();
@@ -392,25 +384,48 @@ export default function EquipmentPage() {
       toast("只能修改自己创建的方案", "error");
       return;
     }
+    setSnapshotTargetView(activeView);
+    setUpdateRemark("");
+    setShowUpdateRemarkDialog(true);
+  };
+
+  const confirmUpdateView = async () => {
+    if (!activeViewId || !snapshotTargetView) return;
+
     try {
       const filters: Record<string, string> = {};
       if (statusFilter) filters.status = statusFilter;
       if (nameSearch) filters.name = nameSearch;
       if (typeFilter) filters.type = typeFilter;
 
-      await api.updateView(activeViewId, {
+      const res = await api.updateView(activeViewId, {
         filters,
         sort_by: sortBy,
         sort_order: sortOrder,
         page_size: pageSize,
         visible_columns: visibleColumns,
+        expected_version: activeViewVersion ?? undefined,
+        snapshot_remark: updateRemark.trim() || undefined,
       });
-      toast("当前方案已更新", "success");
+      setActiveViewVersion(res.data.version);
+      if (res.snapshot_created) {
+        toast(`方案更新成功（已创建快照 #${res.snapshot_created}）`, "success");
+      } else {
+        toast("当前方案已更新", "success");
+      }
       setAppliedReadOnlyView(null);
       setAppliedReadOnlyViewId(null);
+      setShowUpdateRemarkDialog(false);
+      setSnapshotTargetView(null);
+      setUpdateRemark("");
       await loadViews();
-    } catch (err: unknown) {
-      toast(err instanceof Error ? err.message : "更新失败", "error");
+    } catch (err: any) {
+      if (err?.conflict) {
+        setConflictInfo(err.conflict);
+        setShowConflictDialog(true);
+      } else {
+        toast(err instanceof Error ? err.message : "更新失败", "error");
+      }
     }
   };
 
@@ -442,11 +457,13 @@ export default function EquipmentPage() {
       applyViewToState(view);
       if (view.is_owner) {
         setActiveViewId(view.id);
+        setActiveViewVersion(view.version);
         setAppliedReadOnlyView(null);
         setAppliedReadOnlyViewId(null);
-        toast(`已应用方案「${view.name}」`, "success");
+        toast(`已应用方案「${view.name}」(v${view.version})`, "success");
       } else {
         setActiveViewId(null);
+        setActiveViewVersion(null);
         setAppliedReadOnlyView(view);
         setAppliedReadOnlyViewId(view.id);
         toast(`已套用他人方案「${view.name}」（只读，如需保存请另存为新方案）`, "info");
@@ -454,6 +471,65 @@ export default function EquipmentPage() {
       setShowViewDropdown(false);
     } catch (err: unknown) {
       toast(err instanceof Error ? err.message : "应用方案失败", "error");
+    }
+  };
+
+  const openSnapshotDialog = async (view: SavedView) => {
+    setSnapshotTargetView(view);
+    setShowSnapshotDialog(true);
+    setSnapshotsLoading(true);
+    try {
+      const data = await api.getViewSnapshots(view.id);
+      setSnapshots(data);
+    } catch (err: unknown) {
+      toast(err instanceof Error ? err.message : "加载快照失败", "error");
+      setSnapshots([]);
+    } finally {
+      setSnapshotsLoading(false);
+    }
+  };
+
+  const handleRollback = async (snapshot: ViewSnapshot) => {
+    if (!snapshotTargetView) return;
+    if (!confirm(`确定要将方案「${snapshotTargetView.name}」回滚到快照 #${snapshot.id} 吗？\n备注：${snapshot.remark || '(无)'}`)) {
+      return;
+    }
+    try {
+      const res = await api.rollbackView(snapshotTargetView.id, snapshot.id);
+      toast(
+        `回滚成功！已恢复到版本 ${snapshot.version}（当前版本 v${res.data.version}）`,
+        "success"
+      );
+      if (snapshotTargetView.id === activeViewId) {
+        applyViewToState(res.data);
+        setActiveViewVersion(res.data.version);
+      }
+      if (snapshotTargetView.id === appliedReadOnlyViewId) {
+        const isOwner = res.data.is_owner;
+        applyViewToState(res.data);
+        if (!isOwner) {
+          setAppliedReadOnlyView(res.data);
+        }
+      }
+      setShowSnapshotDialog(false);
+      setSnapshotTargetView(null);
+      await loadViews();
+      fetchEquipments();
+    } catch (err: unknown) {
+      toast(err instanceof Error ? err.message : "回滚失败", "error");
+    }
+  };
+
+  const handleManualSnapshot = async (view: SavedView) => {
+    const remark = prompt("请输入快照备注（可选）：") || "";
+    try {
+      const snapshot = await api.createViewSnapshot(view.id, remark);
+      toast(`快照 #${snapshot.id} 创建成功`, "success");
+      if (showSnapshotDialog && snapshotTargetView?.id === view.id) {
+        setSnapshots((prev) => [snapshot, ...prev]);
+      }
+    } catch (err: unknown) {
+      toast(err instanceof Error ? err.message : "创建快照失败", "error");
     }
   };
 
@@ -471,6 +547,7 @@ export default function EquipmentPage() {
     setActiveViewId(null);
     setAppliedReadOnlyView(null);
     setAppliedReadOnlyViewId(null);
+    setActiveViewVersion(null);
   };
 
   const uniqueTypes = useMemo(
@@ -503,7 +580,7 @@ export default function EquipmentPage() {
     if (activeView) {
       return {
         icon: <Bookmark className="w-4 h-4 text-teal-700" />,
-        text: activeView.name,
+        text: `${activeView.name} (v${activeView.version})`,
         textClass: "text-teal-700 font-medium",
       };
     }
@@ -538,21 +615,12 @@ export default function EquipmentPage() {
               onClick={() => setShowViewDropdown(!showViewDropdown)}
               className="btn-outline flex items-center gap-1.5 text-sm"
             >
-              {activeView ? (
-                <>
-                  {currentViewDisplay().icon}
-                  <span className={currentViewDisplay().textClass}>
-                    {currentViewDisplay().text}
-                  </span>
-                </>
-              ) : (
-                <>
-                  {currentViewDisplay().icon}
-                  <span className={currentViewDisplay().textClass}>
-                    {currentViewDisplay().text}
-                  </span>
-                </>
-              )}
+              <>
+                {currentViewDisplay().icon}
+                <span className={currentViewDisplay().textClass}>
+                  {currentViewDisplay().text}
+                </span>
+              </>
               <ChevronDown className="w-4 h-4" />
             </button>
             {showViewDropdown && (
@@ -561,7 +629,7 @@ export default function EquipmentPage() {
                   className="fixed inset-0 z-10"
                   onClick={() => setShowViewDropdown(false)}
                 />
-                <div className="absolute right-0 top-full mt-1 w-64 bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-20">
+                <div className="absolute right-0 top-full mt-1 w-72 bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-20">
                   <div className="px-3 py-2 border-b border-gray-100">
                     <button
                       onClick={() => {
@@ -578,7 +646,7 @@ export default function EquipmentPage() {
                       默认视图
                     </button>
                   </div>
-                  <div className="max-h-60 overflow-y-auto">
+                  <div className="max-h-72 overflow-y-auto">
                     {myViews.length > 0 && (
                       <div>
                         <div className="px-3 py-1.5 text-xs font-medium text-gray-400 uppercase tracking-wider">
@@ -602,35 +670,61 @@ export default function EquipmentPage() {
                                     : "text-gray-400"
                                 }`}
                               />
-                              <span
-                                className={`text-sm ${
-                                  view.id === activeViewId
-                                    ? "text-teal-700 font-medium"
-                                    : "text-gray-700"
-                                }`}
-                              >
-                                {view.name}
-                              </span>
-                              {view.is_default && (
-                                <span className="text-xs text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">
-                                  默认
+                              <div className="flex flex-col items-start">
+                                <span
+                                  className={`text-sm ${
+                                    view.id === activeViewId
+                                      ? "text-teal-700 font-medium"
+                                      : "text-gray-700"
+                                  }`}
+                                >
+                                  {view.name}
+                                  {view.is_default && (
+                                    <span className="ml-1 text-xs text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">
+                                      默认
+                                    </span>
+                                  )}
                                 </span>
-                              )}
+                                <span className="text-xs text-gray-400">v{view.version}</span>
+                              </div>
                             </button>
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                if (
-                                  confirm(`确定要删除方案「${view.name}」吗？`)
-                                ) {
-                                  handleDeleteView(view.id);
-                                }
-                              }}
-                              className="opacity-0 group-hover:opacity-100 p-1 text-gray-400 hover:text-red-500 transition-opacity"
-                              title="删除方案"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
+                            <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  openSnapshotDialog(view);
+                                  setShowViewDropdown(false);
+                                }}
+                                className="p-1 text-gray-400 hover:text-indigo-500"
+                                title="历史快照/回滚"
+                              >
+                                <History className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleManualSnapshot(view);
+                                }}
+                                className="p-1 text-gray-400 hover:text-teal-600"
+                                title="创建快照"
+                              >
+                                <Camera className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (
+                                    confirm(`确定要删除方案「${view.name}」吗？`)
+                                  ) {
+                                    handleDeleteView(view.id);
+                                  }
+                                }}
+                                className="p-1 text-gray-400 hover:text-red-500"
+                                title="删除方案"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
                           </div>
                         ))}
                       </div>
@@ -658,17 +752,34 @@ export default function EquipmentPage() {
                                     : "text-gray-400"
                                 }`}
                               />
-                              <span
-                                className={`text-sm ${
-                                  appliedReadOnlyView?.id === view.id
-                                    ? "text-gray-700 font-medium"
-                                    : "text-gray-700"
-                                }`}
-                              >
-                                {view.name}
-                              </span>
-                              <span className="text-xs text-gray-400">只读</span>
+                              <div className="flex flex-col items-start">
+                                <span
+                                  className={`text-sm ${
+                                    appliedReadOnlyView?.id === view.id
+                                      ? "text-gray-700 font-medium"
+                                      : "text-gray-700"
+                                  }`}
+                                >
+                                  {view.name}
+                                </span>
+                                <span className="text-xs text-gray-400">v{view.version} · 只读</span>
+                              </div>
                             </button>
+                            {isAdmin && (
+                              <div className="opacity-0 group-hover:opacity-100 transition-opacity">
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    openSnapshotDialog(view);
+                                    setShowViewDropdown(false);
+                                  }}
+                                  className="p-1 text-gray-400 hover:text-indigo-500"
+                                  title="查看历史快照"
+                                >
+                                  <History className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            )}
                           </div>
                         ))}
                       </div>
@@ -694,7 +805,7 @@ export default function EquipmentPage() {
                         className="w-full text-left px-2 py-1.5 rounded text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2"
                       >
                         <Check className="w-4 h-4" />
-                        更新当前方案
+                        更新当前方案...
                       </button>
                     )}
                     {appliedReadOnlyView && (
@@ -779,6 +890,7 @@ export default function EquipmentPage() {
                   setActiveViewId(null);
                   setAppliedReadOnlyView(null);
                   setAppliedReadOnlyViewId(null);
+                  setActiveViewVersion(null);
                 }}
                 className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
                   statusFilter === tab.value
@@ -803,6 +915,7 @@ export default function EquipmentPage() {
                   setActiveViewId(null);
                   setAppliedReadOnlyView(null);
                   setAppliedReadOnlyViewId(null);
+                  setActiveViewVersion(null);
                 }}
                 placeholder="搜索设备名称"
                 className="pl-8 pr-3 py-1.5 border border-gray-300 rounded-lg text-sm w-44"
@@ -815,6 +928,7 @@ export default function EquipmentPage() {
                 setCurrentPage(1);
                 setActiveViewId(null);
                 setAppliedReadOnlyView(null);
+                setActiveViewVersion(null);
               }}
               className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm bg-white"
             >
@@ -984,6 +1098,7 @@ export default function EquipmentPage() {
                 setCurrentPage(1);
                 setActiveViewId(null);
                 setAppliedReadOnlyView(null);
+                setActiveViewVersion(null);
               }}
               className="px-2 py-1 border border-gray-300 rounded text-sm bg-white"
             >
@@ -1065,6 +1180,213 @@ export default function EquipmentPage() {
                 className="px-4 py-2 text-sm text-white bg-teal-700 rounded-lg hover:bg-teal-800"
               >
                 保存
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showUpdateRemarkDialog && snapshotTargetView && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-sm">
+            <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
+              <h3 className="font-semibold text-gray-900">更新方案「{snapshotTargetView.name}」</h3>
+              <button
+                onClick={() => {
+                  setShowUpdateRemarkDialog(false);
+                  setSnapshotTargetView(null);
+                  setUpdateRemark("");
+                }}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-5 space-y-4">
+              <div className="text-xs text-gray-500 bg-amber-50 border border-amber-200 rounded-lg p-3 flex items-start gap-2">
+                <Camera className="w-4 h-4 text-amber-600 mt-0.5 flex-shrink-0" />
+                <div>
+                  <p className="font-medium text-amber-700">更新前将自动创建快照</p>
+                  <p className="text-amber-600 mt-1">当前版本 v{activeViewVersion ?? snapshotTargetView.version}，可在下方填写备注以便日后追溯回滚。</p>
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  快照备注（可选）
+                </label>
+                <textarea
+                  value={updateRemark}
+                  onChange={(e) => setUpdateRemark(e.target.value)}
+                  placeholder="例如：调整为按押金降序展示"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-teal-700/30 focus:border-teal-700 resize-none"
+                  rows={3}
+                />
+              </div>
+            </div>
+            <div className="px-5 py-3 border-t border-gray-100 flex justify-end gap-2">
+              <button
+                onClick={() => {
+                  setShowUpdateRemarkDialog(false);
+                  setSnapshotTargetView(null);
+                  setUpdateRemark("");
+                }}
+                className="px-4 py-2 text-sm text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200"
+              >
+                取消
+              </button>
+              <button
+                onClick={confirmUpdateView}
+                className="px-4 py-2 text-sm text-white bg-teal-700 rounded-lg hover:bg-teal-800"
+              >
+                确认更新
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showSnapshotDialog && snapshotTargetView && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[80vh] flex flex-col">
+            <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
+              <div>
+                <h3 className="font-semibold text-gray-900">
+                  历史快照 — 「{snapshotTargetView.name}」
+                </h3>
+                <p className="text-xs text-gray-500 mt-1">选择一个历史版本即可将方案回滚到该状态</p>
+              </div>
+              <div className="flex items-center gap-2">
+                {snapshotTargetView.is_owner && (
+                  <button
+                    onClick={() => handleManualSnapshot(snapshotTargetView)}
+                    className="px-3 py-1.5 text-xs bg-teal-50 text-teal-700 rounded-lg hover:bg-teal-100 flex items-center gap-1"
+                  >
+                    <Camera className="w-3.5 h-3.5" />
+                    新建快照
+                  </button>
+                )}
+                <button
+                  onClick={() => {
+                    setShowSnapshotDialog(false);
+                    setSnapshotTargetView(null);
+                    setSnapshots([]);
+                  }}
+                  className="text-gray-400 hover:text-gray-600"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto p-5">
+              {snapshotsLoading ? (
+                <div className="text-center py-12 text-gray-400">加载中...</div>
+              ) : snapshots.length === 0 ? (
+                <div className="text-center py-12 text-gray-400">
+                  <History className="w-12 h-12 mx-auto mb-3 opacity-40" />
+                  <p>暂无历史快照</p>
+                  <p className="text-xs mt-1">每次更新方案都会自动创建快照</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {snapshots.map((s) => (
+                    <div
+                      key={s.id}
+                      className="border border-gray-200 rounded-lg p-4 hover:bg-gray-50 transition-colors"
+                    >
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-indigo-100 text-indigo-700">
+                              快照 #{s.id}
+                            </span>
+                            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-700">
+                              v{s.version}
+                            </span>
+                            <span className="text-xs text-gray-500 flex items-center gap-1">
+                              <Clock className="w-3 h-3" />
+                              {s.created_at}
+                            </span>
+                            <span className="text-xs text-gray-500 flex items-center gap-1">
+                              <User className="w-3 h-3" />
+                              {s.operator_name}
+                            </span>
+                          </div>
+                          {s.remark && (
+                            <p className="text-sm text-gray-700 mt-2 bg-gray-50 rounded p-2 border border-gray-100">
+                              📝 {s.remark}
+                            </p>
+                          )}
+                          <div className="mt-2 text-xs text-gray-500 space-y-0.5">
+                            <p>筛选：{Object.keys(s.filters).length > 0 ? JSON.stringify(s.filters) : '(无)'}</p>
+                            <p>排序：{s.sort_by ? `${s.sort_by} ${s.sort_order}` : '(默认)'}</p>
+                            <p>分页：{s.page_size} 条/页</p>
+                            <p>显示列：{s.visible_columns?.length ? s.visible_columns.join(', ') : '(默认)'}</p>
+                          </div>
+                        </div>
+                        {snapshotTargetView.is_owner && (
+                          <button
+                            onClick={() => handleRollback(s)}
+                            className="px-3 py-1.5 text-xs bg-amber-50 text-amber-700 border border-amber-200 rounded-lg hover:bg-amber-100 flex items-center gap-1 flex-shrink-0"
+                          >
+                            <RotateCcw className="w-3.5 h-3.5" />
+                            回滚到此版本
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showConflictDialog && conflictInfo && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md">
+            <div className="px-5 py-4 border-b border-amber-200 bg-amber-50 flex items-center gap-3 rounded-t-xl">
+              <div className="w-10 h-10 rounded-full bg-amber-100 flex items-center justify-center">
+                <AlertTriangle className="w-5 h-5 text-amber-600" />
+              </div>
+              <div>
+                <h3 className="font-semibold text-amber-800">检测到并发冲突</h3>
+                <p className="text-xs text-amber-700 mt-0.5">该方案已被他人修改过</p>
+              </div>
+            </div>
+            <div className="p-5 space-y-4">
+              <div className="text-sm text-gray-700 space-y-2">
+                <div className="flex justify-between">
+                  <span className="text-gray-500">您的版本：</span>
+                  <span className="font-mono">v{conflictInfo.submitted_version}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-500">最新版本：</span>
+                  <span className="font-mono font-medium text-red-600">v{conflictInfo.latest_version}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-500">最后更新：</span>
+                  <span>{conflictInfo.latest_updated_at}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-500">修改者：</span>
+                  <span>{conflictInfo.latest_operator.operator_name}</span>
+                </div>
+              </div>
+              <div className="text-xs text-gray-500 bg-gray-50 rounded-lg p-3">
+                💡 建议：先刷新查看最新方案内容，确认是否需要合并对方的修改后再提交。您可以通过「历史快照」功能查看和回滚到任意历史版本。
+              </div>
+            </div>
+            <div className="px-5 py-3 border-t border-gray-100 flex justify-end">
+              <button
+                onClick={async () => {
+                  setShowConflictDialog(false);
+                  setConflictInfo(null);
+                  await loadViews();
+                }}
+                className="px-4 py-2 text-sm text-white bg-teal-700 rounded-lg hover:bg-teal-800"
+              >
+                我知道了，刷新视图
               </button>
             </div>
           </div>
