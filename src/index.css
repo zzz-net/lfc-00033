@@ -1,0 +1,47 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: 'Noto Sans SC', -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  --color-primary: #0F766E;
+  --color-primary-light: #14B8A6;
+  --color-primary-dark: #0D5E58;
+  --color-accent: #F59E0B;
+  --color-accent-light: #FCD34D;
+}
+
+@layer utilities {
+  .btn-primary {
+    @apply bg-teal-700 text-white px-4 py-2 rounded-lg hover:bg-teal-800 transition-colors duration-200 font-medium disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-danger {
+    @apply bg-red-500 text-white px-4 py-2 rounded-lg hover:bg-red-600 transition-colors duration-200 font-medium disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-outline {
+    @apply border border-teal-700 text-teal-700 px-4 py-2 rounded-lg hover:bg-teal-50 transition-colors duration-200 font-medium disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+}
+
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.3);
+  border-color: #0F766E;
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  width: 6px;
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 3px;
+}

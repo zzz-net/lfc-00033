@@ -1,0 +1,172 @@
+import type {
+  LoginResponse,
+  User,
+  Equipment,
+  EquipmentDetail,
+  BorrowRecord,
+  DepositTransaction,
+} from "@/types";
+
+const BASE_URL = "/api";
+
+function getToken(): string | null {
+  return localStorage.getItem("token");
+}
+
+interface ApiResponse<T> {
+  success: boolean;
+  data?: T;
+  error?: string;
+}
+
+async function request<T>(
+  path: string,
+  options: RequestInit = {}
+): Promise<T> {
+  const token = getToken();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...((options.headers as Record<string, string>) || {}),
+  };
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+
+  const res = await fetch(`${BASE_URL}${path}`, {
+    ...options,
+    headers,
+  });
+
+  const body = await res.json().catch(() => ({} as ApiResponse<T>));
+
+  if (!res.ok) {
+    throw new Error(body.error || `请求失败 (${res.status})`);
+  }
+
+  if (body.success !== undefined && body.data !== undefined) {
+    return body.data as T;
+  }
+  if (body.success !== undefined) {
+    return undefined as unknown as T;
+  }
+  return body as T;
+}
+
+async function downloadFile(path: string, filename: string): Promise<void> {
+  const token = getToken();
+  const headers: Record<string, string> = {};
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+  const res = await fetch(`${BASE_URL}${path}`, { headers });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.message || `导出失败 (${res.status})`);
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+export const api = {
+  login: (username: string, password: string) =>
+    request<LoginResponse>("/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    }),
+
+  getMe: () => request<User>("/auth/me"),
+
+  getEquipments: (params?: { status?: string; name?: string; type?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.status) qs.set("status", params.status);
+    if (params?.name) qs.set("name", params.name);
+    if (params?.type) qs.set("type", params.type);
+    const query = qs.toString();
+    return request<Equipment[]>(`/equipments${query ? `?${query}` : ""}`);
+  },
+
+  createEquipment: (data: Partial<Equipment>) =>
+    request<Equipment>("/equipments", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  updateEquipment: (id: number, data: Partial<Equipment>) =>
+    request<Equipment>(`/equipments/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+
+  getEquipmentDetail: (id: number) =>
+    request<EquipmentDetail>(`/equipments/${id}/detail`),
+
+  createBorrow: (data: {
+    equipment_id: number;
+    borrower_name: string;
+    borrower_phone: string;
+  }) =>
+    request<{ record: BorrowRecord; deposit_transaction: DepositTransaction }>(
+      "/borrows",
+      { method: "POST", body: JSON.stringify(data) }
+    ),
+
+  returnBorrow: (id: number) =>
+    request<{ record: BorrowRecord; deposit_transaction: DepositTransaction }>(
+      `/borrows/${id}/return`,
+      { method: "PUT" }
+    ),
+
+  reportDamage: (id: number, damage_description: string) =>
+    request<BorrowRecord>(`/borrows/${id}/damage`, {
+      method: "PUT",
+      body: JSON.stringify({ damage_description }),
+    }),
+
+  confirmDamage: (id: number, deposit_deducted: number) =>
+    request<{
+      record: BorrowRecord;
+      deposit_transaction?: DepositTransaction;
+    }>(`/borrows/${id}/confirm-damage`, {
+      method: "PUT",
+      body: JSON.stringify({ deposit_deducted }),
+    }),
+
+  getBorrows: (params?: {
+    status?: string;
+    borrower_name?: string;
+    equipment_name?: string;
+  }) => {
+    const qs = new URLSearchParams();
+    if (params?.status) qs.set("status", params.status);
+    if (params?.borrower_name) qs.set("borrower_name", params.borrower_name);
+    if (params?.equipment_name)
+      qs.set("equipment_name", params.equipment_name);
+    const query = qs.toString();
+    return request<BorrowRecord[]>(`/borrows${query ? `?${query}` : ""}`);
+  },
+
+  getDeposits: (params?: {
+    borrower_name?: string;
+    equipment_name?: string;
+    type?: string;
+  }) => {
+    const qs = new URLSearchParams();
+    if (params?.borrower_name) qs.set("borrower_name", params.borrower_name);
+    if (params?.equipment_name)
+      qs.set("equipment_name", params.equipment_name);
+    if (params?.type) qs.set("type", params.type);
+    const query = qs.toString();
+    return request<DepositTransaction[]>(
+      `/deposits${query ? `?${query}` : ""}`
+    );
+  },
+
+  exportEquipments: () => downloadFile("/export/equipments", "设备台账.csv"),
+  exportBorrows: () => downloadFile("/export/borrows", "借还记录.csv"),
+  exportDeposits: () => downloadFile("/export/deposits", "押金流水.csv"),
+};
