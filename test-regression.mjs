@@ -1422,6 +1422,186 @@ async function main() {
     }
   });
 
+  // ============= 测试 29：前端响应结构对齐测试（卡住更新/回滚崩溃点） =============
+  await test("29. 前端响应结构对齐测试 - 卡住更新/回滚崩溃点", async () => {
+    const viewName = `崩溃点测试-${Date.now()}`;
+
+    // 29.1 创建方案
+    const create = await req("/api/views", "POST", {
+      page: "equipments",
+      name: viewName,
+      filters: { status: "available" },
+      sort_by: "name",
+      sort_order: "asc",
+      page_size: 10,
+    }, adminToken);
+    const viewId = create.data.id;
+    assert(create.data.version === 1, "新建方案 version = 1");
+
+    try {
+      // 29.2 验证 UPDATE 返回结构（必须有 data 和 snapshot_created 两个顶级字段）
+      const update = await req(`/api/views/${viewId}`, "PUT", {
+        filters: { status: "borrowed" },
+        expected_version: 1,
+        snapshot_remark: "测试更新结构",
+      }, adminToken);
+      assert(update.success === true, "UPDATE 返回 success=true");
+      assert(update.data !== undefined && typeof update.data === "object", "UPDATE 返回有 data 字段（SavedView 对象）");
+      assert(typeof update.data.version === "number", "UPDATE.data.version 存在且是数字");
+      assert(update.data.version === 2, "UPDATE 后版本号 = 2");
+      assert(typeof update.snapshot_created === "number", "UPDATE 返回有 snapshot_created 字段（不能丢）");
+      const snapshotId = update.snapshot_created;
+
+      // 29.3 模拟前端旧解包逻辑 → 必须崩溃（证明 bug 存在）
+      const oldUnpack = (body) => {
+        if (body.success !== undefined && body.data !== undefined) {
+          if (body.total !== undefined) return body;
+          return body.data; // 旧逻辑：只返回 data，丢了 snapshot_created
+        }
+        return body;
+      };
+      const oldUpdateUnpacked = oldUnpack(update);
+      let oldLogicCrash = false;
+      try {
+        const _v = oldUpdateUnpacked.data.version; // 旧逻辑下会崩溃
+      } catch (e) {
+        oldLogicCrash = true;
+      }
+      assert(oldLogicCrash === true, "旧解包逻辑确实会崩溃：oldUpdateUnpacked.data.version 报错");
+
+      // 29.4 模拟前端新解包逻辑 → 必须不崩溃
+      const newUnpack = (body) => {
+        if (body.success !== undefined && body.data !== undefined) {
+          const knownKeys = new Set(["success", "data", "error", "total", "page", "page_size"]);
+          const hasExtraFields = Object.keys(body).some((k) => !knownKeys.has(k));
+          if (hasExtraFields || body.total !== undefined) return body;
+          return body.data;
+        }
+        return body;
+      };
+      const newUpdateUnpacked = newUnpack(update);
+      let newLogicCrash = false;
+      try {
+        const _v = newUpdateUnpacked.data.version;
+      } catch (e) {
+        newLogicCrash = true;
+      }
+      assert(newLogicCrash === false, "新解包逻辑不崩溃：newUpdateUnpacked.data.version 可访问");
+      assert(newUpdateUnpacked.data.version === 2, "新解包后 version = 2");
+      assert(newUpdateUnpacked.snapshot_created === snapshotId, "新解包后 snapshot_created 保留，没有丢失");
+
+      // 29.5 验证 ROLLBACK 返回结构
+      const rollback = await req(`/api/views/${viewId}/rollback/${snapshotId}`, "POST", {}, adminToken);
+      assert(rollback.success === true, "ROLLBACK 返回 success=true");
+      assert(rollback.data !== undefined && typeof rollback.data === "object", "ROLLBACK 返回有 data 字段");
+      assert(typeof rollback.rollback_from_snapshot === "number", "ROLLBACK 返回有 rollback_from_snapshot 字段");
+      assert(rollback.data.version === 3, "ROLLBACK 后版本号 = 3");
+      assert(rollback.data.filters.status === "available", "ROLLBACK 后 filters.status 恢复为 available");
+      assert(rollback.data.is_owner === true, "ROLLBACK 后 is_owner 正确恢复（可编辑）");
+
+      // 29.6 ROLLBACK 旧解包逻辑也崩溃
+      const oldRollbackUnpacked = oldUnpack(rollback);
+      let oldRollbackCrash = false;
+      try {
+        const _v = oldRollbackUnpacked.data.version;
+      } catch (e) {
+        oldRollbackCrash = true;
+      }
+      assert(oldRollbackCrash === true, "ROLLBACK 旧解包逻辑也会崩溃");
+
+      // 29.7 ROLLBACK 新解包逻辑正常
+      const newRollbackUnpacked = newUnpack(rollback);
+      assert(newRollbackUnpacked.data.version === 3, "ROLLBACK 新解包后 version = 3");
+      assert(newRollbackUnpacked.rollback_from_snapshot === snapshotId, "ROLLBACK 新解包后 rollback_from_snapshot 保留");
+      assert(newRollbackUnpacked.data.is_owner === true, "ROLLBACK 新解包后 is_owner = true（可编辑状态正确）");
+
+      // 29.8 普通前台查看该方案，is_owner=false（只读）
+      const frontViews = await req("/api/views?include_all=true", "GET", null, frontToken);
+      const frontView = frontViews.data.find(v => v.id === viewId);
+      assert(frontView !== undefined, "前台能看到管理员共享方案");
+      assert(frontView.is_owner === false, "前台查看 is_owner = false（只读状态正确）");
+      assert(frontView.version === 3, "前台看到的版本号 = 3");
+
+      // 29.9 前台回滚 → 403 权限错误
+      let frontRollbackStatus = 0;
+      try {
+        await req(`/api/views/${viewId}/rollback/${snapshotId}`, "POST", {}, frontToken);
+      } catch (e) {
+        frontRollbackStatus = e.status;
+      }
+      assert(frontRollbackStatus === 403, "前台回滚他人方案 → 403 拒绝");
+
+      // 29.10 前台更新 → 403 权限错误
+      let frontUpdateStatus = 0;
+      try {
+        await req(`/api/views/${viewId}`, "PUT", {
+          filters: { status: "damaged" },
+          expected_version: 3,
+        }, frontToken);
+      } catch (e) {
+        frontUpdateStatus = e.status;
+      }
+      assert(frontUpdateStatus === 403, "前台更新他人方案 → 403 拒绝");
+
+      // 29.11 冲突错误结构验证（必须有 conflict 字段）
+      let conflictErr = null;
+      try {
+        await req(`/api/views/${viewId}`, "PUT", {
+          filters: { status: "damaged" },
+          expected_version: 1, // 故意用旧版本
+        }, adminToken);
+      } catch (e) {
+        conflictErr = e;
+      }
+      assert(conflictErr !== null && conflictErr.status === 409, "冲突检测返回 409");
+      assert(conflictErr.body.conflict !== undefined, "冲突响应包含 conflict 字段（前端 err.conflict 可访问）");
+      assert(conflictErr.body.conflict.current_version === 3, "conflict.current_version 正确");
+      assert(conflictErr.body.conflict.latest_operator !== undefined, "conflict.latest_operator 存在");
+      assert(conflictErr.body.conflict.latest_operator.operator_name !== undefined, "conflict.latest_operator.operator_name 存在");
+
+      // 29.12 刷新页面 / 重启应用后状态持久化（查询单条接口）
+      const getOne = await req(`/api/views/${viewId}`, "GET", null, adminToken);
+      assert(getOne.success === true, "GET /:id 返回 success=true");
+      assert(getOne.data.version === 3, "刷新后 version 仍然 = 3");
+      assert(getOne.data.filters.status === "available", "刷新后 filters.status 仍然 = available");
+      assert(getOne.data.is_owner === true, "刷新后 is_owner 仍然 = true");
+
+      // 29.13 快照列表接口返回结构
+      const snaps = await req(`/api/views/${viewId}/snapshots`, "GET", null, adminToken);
+      assert(snaps.success === true, "快照列表返回 success=true");
+      assert(Array.isArray(snaps.data), "快照列表 data 是数组");
+      assert(snaps.data.length >= 2, "至少 2 条快照（更新自动 + 回滚自动）");
+      assert(snaps.data[0].version >= snaps.data[1].version, "快照倒序排列，最新在前");
+      assert(typeof snaps.data[0].operator_name === "string", "每条快照有 operator_name");
+      assert(typeof snaps.data[0].remark === "string", "每条快照有 remark");
+
+      // 29.14 完整模拟前端更新流程（从调用到状态更新全链路）
+      const update2 = await req(`/api/views/${viewId}`, "PUT", {
+        filters: { status: "borrowed" },
+        expected_version: 3,
+      }, adminToken);
+      const frontUnpacked = newUnpack(update2);
+      const newVersion = frontUnpacked.data.version;
+      const newSnapshotCreated = frontUnpacked.snapshot_created;
+      assert(newVersion === 4, "前端取值：newVersion = 4");
+      assert(typeof newSnapshotCreated === "number", "前端取值：newSnapshotCreated 是数字");
+      assert(frontUnpacked.data.filters.status === "borrowed", "前端取值：filters.status = borrowed");
+      assert(frontUnpacked.data.is_owner === true, "前端取值：is_owner = true（可编辑状态正确）");
+
+      // 29.15 完整模拟前端回滚流程
+      const rollback2 = await req(`/api/views/${viewId}/rollback/${newSnapshotCreated}`, "POST", {}, adminToken);
+      const rbUnpacked = newUnpack(rollback2);
+      const rbVersion = rbUnpacked.data.version;
+      const rbSnapshotId = rbUnpacked.rollback_from_snapshot;
+      assert(rbVersion === 5, "前端回滚取值：version = 5");
+      assert(rbSnapshotId === newSnapshotCreated, "前端回滚取值：rollback_from_snapshot 正确");
+      assert(rbUnpacked.data.filters.status === "borrowed", "前端回滚取值：filters.status 正确恢复");
+      assert(rbUnpacked.data.is_owner === true, "前端回滚取值：is_owner 正确恢复");
+    } finally {
+      await req(`/api/views/${viewId}`, "DELETE", null, adminToken).catch(() => {});
+    }
+  });
+
   // 总结
   console.log("\n" + "=".repeat(60));
   console.log(`回归测试结果：通过 ${passed} 项，失败 ${failed} 项`);

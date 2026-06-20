@@ -44,11 +44,18 @@ async function request<T>(
   const body = await res.json().catch(() => ({} as ApiResponse<T>));
 
   if (!res.ok) {
-    throw new Error(body.error || `请求失败 (${res.status})`);
+    const err = new Error(body.error || `请求失败 (${res.status})`);
+    (err as any).responseBody = body;
+    if (body.conflict) {
+      (err as any).conflict = body.conflict;
+    }
+    throw err;
   }
 
   if (body.success !== undefined && body.data !== undefined) {
-    if (body.total !== undefined) {
+    const knownKeys = new Set(["success", "data", "error", "total", "page", "page_size"]);
+    const hasExtraFields = Object.keys(body).some((k) => !knownKeys.has(k));
+    if (hasExtraFields || body.total !== undefined) {
       return body as T;
     }
     return body.data as T;
