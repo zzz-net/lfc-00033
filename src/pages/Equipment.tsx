@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback } from "react";
-import { Plus, Search } from "lucide-react";
+import { Plus, Search, Download } from "lucide-react";
 import { api } from "@/utils/api";
 import { useAuthStore } from "@/store/authStore";
 import { toast } from "@/components/Toast";
 import { formatAmount, EQUIPMENT_STATUS_LABELS, EQUIPMENT_STATUS_COLORS } from "@/utils/helpers";
+import { useLocalStorage } from "@/hooks/useLocalStorage";
 import type { Equipment } from "@/types";
 import EquipmentModal from "@/components/EquipmentModal";
 import EquipmentDetailDrawer from "@/components/EquipmentDetailDrawer";
@@ -22,9 +23,9 @@ export default function EquipmentPage() {
 
   const [equipments, setEquipments] = useState<Equipment[]>([]);
   const [loading, setLoading] = useState(true);
-  const [statusFilter, setStatusFilter] = useState("");
-  const [nameSearch, setNameSearch] = useState("");
-  const [typeFilter, setTypeFilter] = useState("");
+  const [statusFilter, setStatusFilter] = useLocalStorage<string>("equipment_filter_status", "");
+  const [nameSearch, setNameSearch] = useLocalStorage<string>("equipment_filter_name", "");
+  const [typeFilter, setTypeFilter] = useLocalStorage<string>("equipment_filter_type", "");
 
   const [showModal, setShowModal] = useState(false);
   const [editItem, setEditItem] = useState<Equipment | null>(null);
@@ -89,24 +90,48 @@ export default function EquipmentPage() {
     }
   };
 
+  const handleExport = async () => {
+    try {
+      await api.exportEquipments({
+        status: statusFilter,
+        name: nameSearch,
+        type: typeFilter,
+      });
+      toast("导出成功", "success");
+    } catch (err: unknown) {
+      toast(err instanceof Error ? err.message : "导出失败", "error");
+    }
+  };
+
   const uniqueTypes = [...new Set(equipments.map((e) => e.type))].filter(Boolean);
 
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold text-gray-900">设备台账</h1>
-        {isAdmin && (
-          <button
-            onClick={() => {
-              setEditItem(null);
-              setShowModal(true);
-            }}
-            className="btn-primary flex items-center gap-1.5 text-sm"
-          >
-            <Plus className="w-4 h-4" />
-            添加设备
-          </button>
-        )}
+        <div className="flex items-center gap-2">
+          {isAdmin && (
+            <button
+              onClick={handleExport}
+              className="btn-outline flex items-center gap-1.5 text-sm"
+            >
+              <Download className="w-4 h-4" />
+              导出当前筛选
+            </button>
+          )}
+          {isAdmin && (
+            <button
+              onClick={() => {
+                setEditItem(null);
+                setShowModal(true);
+              }}
+              className="btn-primary flex items-center gap-1.5 text-sm"
+            >
+              <Plus className="w-4 h-4" />
+              添加设备
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="bg-white rounded-xl shadow-sm border border-gray-100">

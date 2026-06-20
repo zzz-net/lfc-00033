@@ -52,24 +52,33 @@ async function request<T>(
   return body as T;
 }
 
-async function downloadFile(path: string, filename: string): Promise<void> {
+async function downloadFile(path: string, filename: string, params?: Record<string, string>): Promise<void> {
   const token = getToken();
   const headers: Record<string, string> = {};
   if (token) {
     headers["Authorization"] = `Bearer ${token}`;
   }
-  const res = await fetch(`${BASE_URL}${path}`, { headers });
+  let url = `${BASE_URL}${path}`;
+  if (params) {
+    const qs = new URLSearchParams();
+    Object.entries(params).forEach(([k, v]) => {
+      if (v) qs.set(k, v);
+    });
+    const query = qs.toString();
+    if (query) url += `?${query}`;
+  }
+  const res = await fetch(url, { headers });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.message || `导出失败 (${res.status})`);
+    throw new Error(body.error || `导出失败 (${res.status})`);
   }
   const blob = await res.blob();
-  const url = URL.createObjectURL(blob);
+  const objectUrl = URL.createObjectURL(blob);
   const a = document.createElement("a");
-  a.href = url;
+  a.href = objectUrl;
   a.download = filename;
   a.click();
-  URL.revokeObjectURL(url);
+  URL.revokeObjectURL(objectUrl);
 }
 
 export const api = {
@@ -166,7 +175,10 @@ export const api = {
     );
   },
 
-  exportEquipments: () => downloadFile("/export/equipments", "设备台账.csv"),
-  exportBorrows: () => downloadFile("/export/borrows", "借还记录.csv"),
-  exportDeposits: () => downloadFile("/export/deposits", "押金流水.csv"),
+  exportEquipments: (params?: { status?: string; name?: string; type?: string }) =>
+    downloadFile("/export/equipments", "设备台账.csv", params as Record<string, string>),
+  exportBorrows: (params?: { status?: string; borrower_name?: string; equipment_name?: string }) =>
+    downloadFile("/export/borrows", "借还记录.csv", params as Record<string, string>),
+  exportDeposits: (params?: { borrower_name?: string; equipment_name?: string; type?: string }) =>
+    downloadFile("/export/deposits", "押金流水.csv", params as Record<string, string>),
 };

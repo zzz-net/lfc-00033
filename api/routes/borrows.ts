@@ -76,7 +76,9 @@ router.put('/:id/return', authMiddleware, (req: Request, res: Response): void =>
   }
 
   if (record.status !== 'borrowed') {
-    res.status(400).json({ success: false, error: '该记录已归还，不可重复操作' })
+    const statusMap: Record<string, string> = { returned: '已归还', damaged: '已损坏', pending_confirm: '待确认损坏' }
+    const statusLabel = statusMap[record.status] || record.status
+    res.status(400).json({ success: false, error: `该记录当前状态为「${statusLabel}」，不可执行归还操作` })
     return
   }
 
@@ -130,7 +132,9 @@ router.put('/:id/damage', authMiddleware, (req: Request, res: Response): void =>
   }
 
   if (record.status !== 'borrowed') {
-    res.status(400).json({ success: false, error: '该记录不处于借出状态，无法报损' })
+    const statusMap: Record<string, string> = { returned: '已归还', damaged: '已损坏', pending_confirm: '待确认损坏' }
+    const statusLabel = statusMap[record.status] || record.status
+    res.status(400).json({ success: false, error: `该记录当前状态为「${statusLabel}」，不可执行报损操作` })
     return
   }
 
@@ -181,7 +185,9 @@ router.put('/:id/confirm-damage', authMiddleware, adminMiddleware, (req: Request
   }
 
   if (record.status !== 'pending_confirm') {
-    res.status(400).json({ success: false, error: '该记录不处于待确认状态' })
+    const statusMap: Record<string, string> = { borrowed: '借出中', returned: '已归还', damaged: '已损坏' }
+    const statusLabel = statusMap[record.status] || record.status
+    res.status(400).json({ success: false, error: `该记录当前状态为「${statusLabel}」，不可执行确认损坏操作` })
     return
   }
 

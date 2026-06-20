@@ -1,8 +1,10 @@
 import { useState, useEffect, useCallback } from "react";
-import { Search } from "lucide-react";
+import { Search, Download } from "lucide-react";
 import { api } from "@/utils/api";
+import { useAuthStore } from "@/store/authStore";
 import { toast } from "@/components/Toast";
 import { formatAmount, formatDate, DEPOSIT_TYPE_LABELS, DEPOSIT_TYPE_COLORS } from "@/utils/helpers";
+import { useLocalStorage } from "@/hooks/useLocalStorage";
 import type { DepositTransaction } from "@/types";
 
 const TYPE_OPTIONS = [
@@ -13,12 +15,15 @@ const TYPE_OPTIONS = [
 ];
 
 export default function DepositLogPage() {
+  const { user } = useAuthStore();
+  const isAdmin = user?.role === "admin";
+
   const [transactions, setTransactions] = useState<DepositTransaction[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const [typeFilter, setTypeFilter] = useState("");
-  const [borrowerSearch, setBorrowerSearch] = useState("");
-  const [equipmentSearch, setEquipmentSearch] = useState("");
+  const [typeFilter, setTypeFilter] = useLocalStorage<string>("deposit_filter_type", "");
+  const [borrowerSearch, setBorrowerSearch] = useLocalStorage<string>("deposit_filter_borrower", "");
+  const [equipmentSearch, setEquipmentSearch] = useLocalStorage<string>("deposit_filter_equipment", "");
 
   const fetchDeposits = useCallback(async () => {
     setLoading(true);
@@ -40,9 +45,33 @@ export default function DepositLogPage() {
     fetchDeposits();
   }, [fetchDeposits]);
 
+  const handleExport = async () => {
+    try {
+      await api.exportDeposits({
+        type: typeFilter,
+        borrower_name: borrowerSearch,
+        equipment_name: equipmentSearch,
+      });
+      toast("导出成功", "success");
+    } catch (err: unknown) {
+      toast(err instanceof Error ? err.message : "导出失败", "error");
+    }
+  };
+
   return (
     <div className="space-y-4">
-      <h1 className="text-xl font-bold text-gray-900">押金流水</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-xl font-bold text-gray-900">押金流水</h1>
+        {isAdmin && (
+          <button
+            onClick={handleExport}
+            className="btn-outline flex items-center gap-1.5 text-sm"
+          >
+            <Download className="w-4 h-4" />
+            导出当前筛选
+          </button>
+        )}
+      </div>
 
       <div className="bg-white rounded-xl shadow-sm border border-gray-100">
         <div className="px-5 py-4 border-b border-gray-100 flex flex-wrap items-center gap-3">

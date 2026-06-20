@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback } from "react";
-import { X } from "lucide-react";
+import { X, Download } from "lucide-react";
 import { api } from "@/utils/api";
 import { useAuthStore } from "@/store/authStore";
 import { toast } from "@/components/Toast";
 import { formatAmount, formatDate, EQUIPMENT_STATUS_LABELS, EQUIPMENT_STATUS_COLORS } from "@/utils/helpers";
+import { useLocalStorage } from "@/hooks/useLocalStorage";
 import type { Equipment, BorrowRecord } from "@/types";
 
 type TabKey = "borrow" | "return" | "damage";
@@ -18,7 +19,7 @@ export default function BorrowReturnPage() {
   const { user } = useAuthStore();
   const isAdmin = user?.role === "admin";
 
-  const [activeTab, setActiveTab] = useState<TabKey>("borrow");
+  const [activeTab, setActiveTab] = useLocalStorage<TabKey>("borrow_return_tab", "borrow");
 
   const [availableEquipments, setAvailableEquipments] = useState<Equipment[]>([]);
   const [borrowedRecords, setBorrowedRecords] = useState<BorrowRecord[]>([]);
@@ -149,9 +150,32 @@ export default function BorrowReturnPage() {
     }
   };
 
+  const handleExport = async () => {
+    try {
+      let status = "";
+      if (activeTab === "return") status = "borrowed";
+      else if (activeTab === "damage") status = "pending_confirm";
+      await api.exportBorrows({ status: status || undefined });
+      toast("导出成功", "success");
+    } catch (err: unknown) {
+      toast(err instanceof Error ? err.message : "导出失败", "error");
+    }
+  };
+
   return (
     <div className="space-y-4">
-      <h1 className="text-xl font-bold text-gray-900">借还操作</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-xl font-bold text-gray-900">借还操作</h1>
+        {isAdmin && (activeTab === "return" || activeTab === "damage") && (
+          <button
+            onClick={handleExport}
+            className="btn-outline flex items-center gap-1.5 text-sm"
+          >
+            <Download className="w-4 h-4" />
+            导出当前列表
+          </button>
+        )}
+      </div>
 
       <div className="bg-white rounded-xl shadow-sm border border-gray-100">
         <div className="flex border-b border-gray-100">

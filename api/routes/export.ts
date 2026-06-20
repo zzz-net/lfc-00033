@@ -23,7 +23,17 @@ function sendCsv(res: Response, filename: string, header: string, rows: string[]
 }
 
 router.get('/equipments', authMiddleware, adminMiddleware, (req: Request, res: Response): void => {
-  const rows = db.prepare('SELECT * FROM equipments ORDER BY created_at DESC').all() as Record<string, unknown>[]
+  const { status, name, type } = req.query
+  let sql = 'SELECT * FROM equipments WHERE 1=1'
+  const params: unknown[] = []
+
+  if (status) { sql += ' AND status = ?'; params.push(status) }
+  if (name) { sql += ' AND name LIKE ?'; params.push(`%${name}%`) }
+  if (type) { sql += ' AND type = ?'; params.push(type) }
+
+  sql += ' ORDER BY created_at DESC'
+
+  const rows = db.prepare(sql).all(...params) as Record<string, unknown>[]
   const header = toCsvRow(['ID', '名称', '类型', '状态', '押金金额', '备注', '创建时间', '更新时间'])
   const statusMap: Record<string, string> = { available: '可用', borrowed: '借出', damaged: '损坏', pending_confirm: '待确认' }
   const csvRows = rows.map(r => toCsvRow([
@@ -34,12 +44,20 @@ router.get('/equipments', authMiddleware, adminMiddleware, (req: Request, res: R
 })
 
 router.get('/borrows', authMiddleware, adminMiddleware, (req: Request, res: Response): void => {
-  const rows = db.prepare(
-    `SELECT br.*, e.name as equipment_name, e.type as equipment_type
-     FROM borrow_records br
-     JOIN equipments e ON br.equipment_id = e.id
-     ORDER BY br.created_at DESC`
-  ).all() as Record<string, unknown>[]
+  const { status, borrower_name, equipment_name } = req.query
+  let sql = `SELECT br.*, e.name as equipment_name, e.type as equipment_type
+    FROM borrow_records br
+    JOIN equipments e ON br.equipment_id = e.id
+    WHERE 1=1`
+  const params: unknown[] = []
+
+  if (status) { sql += ' AND br.status = ?'; params.push(status) }
+  if (borrower_name) { sql += ' AND br.borrower_name LIKE ?'; params.push(`%${borrower_name}%`) }
+  if (equipment_name) { sql += ' AND e.name LIKE ?'; params.push(`%${equipment_name}%`) }
+
+  sql += ' ORDER BY br.created_at DESC'
+
+  const rows = db.prepare(sql).all(...params) as Record<string, unknown>[]
   const header = toCsvRow(['ID', '设备名称', '设备类型', '借用人', '联系电话', '状态', '借出时间', '归还时间', '损坏描述', '冻结押金', '退还押金', '扣除押金'])
   const statusMap: Record<string, string> = { borrowed: '借出', returned: '已归还', damaged: '损坏', pending_confirm: '待确认' }
   const csvRows = rows.map(r => toCsvRow([
@@ -51,7 +69,17 @@ router.get('/borrows', authMiddleware, adminMiddleware, (req: Request, res: Resp
 })
 
 router.get('/deposits', authMiddleware, adminMiddleware, (req: Request, res: Response): void => {
-  const rows = db.prepare('SELECT * FROM deposit_transactions ORDER BY created_at DESC').all() as Record<string, unknown>[]
+  const { borrower_name, equipment_name, type } = req.query
+  let sql = 'SELECT * FROM deposit_transactions WHERE 1=1'
+  const params: unknown[] = []
+
+  if (borrower_name) { sql += ' AND borrower_name LIKE ?'; params.push(`%${borrower_name}%`) }
+  if (equipment_name) { sql += ' AND equipment_name LIKE ?'; params.push(`%${equipment_name}%`) }
+  if (type) { sql += ' AND type = ?'; params.push(type) }
+
+  sql += ' ORDER BY created_at DESC'
+
+  const rows = db.prepare(sql).all(...params) as Record<string, unknown>[]
   const header = toCsvRow(['ID', '借还记录ID', '设备ID', '设备名称', '借用人', '类型', '金额', '操作人ID', '操作人', '创建时间'])
   const typeMap: Record<string, string> = { freeze: '冻结', refund: '退还', deduct: '扣除' }
   const csvRows = rows.map(r => toCsvRow([
