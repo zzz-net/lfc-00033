@@ -1,6 +1,6 @@
 import http from "node:http";
 
-const BaseUrl = "http://localhost:3002";
+const BaseUrl = "http://localhost:3001";
 let passed = 0;
 let failed = 0;
 
@@ -1406,7 +1406,7 @@ async function main() {
       await req(`/api/views/${viewId}/rollback/${manualSnap.data.id}`, "POST", {}, adminToken);
 
       // 28.5 查日志：应有 create + snapshot + conflict + rollback
-      const logs = await req("/api/views/logs?limit=50", "GET", null, adminToken);
+      const logs = await req("/api/views/logs?limit=500&include_all=true", "GET", null, adminToken);
       const myLogs = logs.data.filter(l => l.view_name === viewName);
       const actions = myLogs.map(l => l.action);
       assert(actions.includes("create"), "日志包含 create");
@@ -1589,16 +1589,246 @@ async function main() {
       assert(frontUnpacked.data.is_owner === true, "前端取值：is_owner = true（可编辑状态正确）");
 
       // 29.15 完整模拟前端回滚流程
+      // 注意：快照是 update2 之前创建的，对应 v3 状态（status=available）
+      // 所以回滚后应该恢复到 available，而不是 borrowed
       const rollback2 = await req(`/api/views/${viewId}/rollback/${newSnapshotCreated}`, "POST", {}, adminToken);
       const rbUnpacked = newUnpack(rollback2);
       const rbVersion = rbUnpacked.data.version;
       const rbSnapshotId = rbUnpacked.rollback_from_snapshot;
       assert(rbVersion === 5, "前端回滚取值：version = 5");
       assert(rbSnapshotId === newSnapshotCreated, "前端回滚取值：rollback_from_snapshot 正确");
-      assert(rbUnpacked.data.filters.status === "borrowed", "前端回滚取值：filters.status 正确恢复");
+      assert(rbUnpacked.data.filters.status === "available", "前端回滚取值：filters.status 正确恢复（回滚到更新前快照 v3 状态=available）");
       assert(rbUnpacked.data.is_owner === true, "前端回滚取值：is_owner 正确恢复");
     } finally {
       await req(`/api/views/${viewId}`, "DELETE", null, adminToken).catch(() => {});
+    }
+  });
+
+  // ============= 测试 30：完整链路 - 管理员保存/撤销/刷新 + 普通用户只读 + 冲突 =============
+  await test("30. 完整链路验证：管理员保存/撤销/刷新不乱，普通用户无越权，冲突提示清晰", async () => {
+    // === 30.1 管理员创建方案（模拟初始化场景） ===
+    const sharedViewName = `共享方案-完整链路-${Date.now()}`;
+    const adminCreate = await req("/api/views", "POST", {
+      page: "equipments",
+      name: sharedViewName,
+      filters: { status: "available", type: "轮椅" },
+      sort_by: "name",
+      sort_order: "asc",
+      page_size: 20,
+      visible_columns: ["name", "type", "status"],
+    }, adminToken);
+    const sharedViewId = adminCreate.data.id;
+    assert(adminCreate.data.version === 1, "管理员创建方案 v1");
+    assert(adminCreate.data.is_owner === true, "管理员看自己的方案 is_owner=true（可编辑）");
+
+    try {
+      // === 30.2 管理员保存为新版本（更新方案） ===
+      const updateV2 = await req(`/api/views/${sharedViewId}`, "PUT", {
+        filters: { status: "available" },
+        sort_by: "deposit_amount",
+        sort_order: "desc",
+        page_size: 50,
+        expected_version: 1,
+        snapshot_remark: "管理员改成按押金降序",
+      }, adminToken);
+      assert(updateV2.data.version === 2, "保存为新版本 v2");
+      assert(updateV2.snapshot_created && updateV2.snapshot_created > 0, "保存前自动创建快照（用于撤销）");
+      assert(updateV2.data.filters.status === "available", "v2 筛选条件：status=available");
+      assert(updateV2.data.sort_by === "deposit_amount", "v2 排序字段：押金金额");
+
+      // === 30.3 管理员撤销到上一个版本（回滚到快照 v1） ===
+      const snapshots = await req(`/api/views/${sharedViewId}/snapshots`, "GET", null, adminToken);
+      const snapV1 = snapshots.data.find((s) => s.version === 1);
+      assert(snapV1 !== undefined, "找到 v1 快照（保存新版本前自动留底）");
+      assert(snapV1.filters.type === "轮椅", "v1 快照 type=轮椅");
+      assert(snapV1.sort_by === "name", "v1 快照 sort_by=name");
+
+      const rollbackRes = await req(
+        `/api/views/${sharedViewId}/rollback/${snapV1.id}`,
+        "POST", {}, adminToken
+      );
+      assert(rollbackRes.success === true, "撤销（回滚）成功");
+      assert(rollbackRes.data.version === 3, "撤销后版本号递增到 v3（每次版本化操作都递增）");
+      assert(rollbackRes.data.filters.type === "轮椅", "撤销后 type=轮椅 恢复");
+      assert(rollbackRes.data.filters.status === "available", "撤销后 status=available 保持");
+      assert(rollbackRes.data.sort_by === "name", "撤销后 sort_by=name 恢复");
+      assert(rollbackRes.data.page_size === 20, "撤销后 page_size=20 恢复");
+
+      // === 30.4 刷新页面 / 重启应用后，停留在正确方案和版本 ===
+      for (let i = 0; i < 3; i++) {
+        const getById = await req(`/api/views/${sharedViewId}`, "GET", null, adminToken);
+        assert(getById.data.id === sharedViewId, `第${i+1}次刷新：方案 id 不变`);
+        assert(getById.data.version === 3, `第${i+1}次刷新：版本号停留在 v3`);
+        assert(getById.data.filters.type === "轮椅", `第${i+1}次刷新：筛选条件 type=轮椅 保持`);
+        assert(getById.data.sort_by === "name", `第${i+1}次刷新：排序 name 保持`);
+        assert(getById.data.is_owner === true, `第${i+1}次刷新：管理员 is_owner=true（可编辑）`);
+        assert(getById.data.updated_at !== null && getById.data.updated_at !== undefined,
+          `第${i+1}次刷新：返回 updated_at 最近更新时间`);
+      }
+
+      // 从列表中也能找到（include_all=false 只看自己的）
+      const myList = await req("/api/views?page=equipments&include_all=false", "GET", null, adminToken);
+      const foundInMine = myList.data.find((v) => v.id === sharedViewId);
+      assert(foundInMine !== undefined, "管理员在自己的方案列表中能找到");
+      assert(foundInMine.version === 3, "列表中版本号也是 v3");
+
+      // === 30.5 普通用户：能看到共享方案，只能查看/套用，不能改 ===
+      // 30.5.1 前台用户能获取共享方案（include_all=true）
+      const frontViews = await req(
+        "/api/views?page=equipments&include_all=true",
+        "GET", null, frontToken
+      );
+      const frontSeesShared = frontViews.data.find((v) => v.id === sharedViewId);
+      assert(frontSeesShared !== undefined, "前台用户能看到管理员共享的方案");
+      assert(frontSeesShared.is_owner === false, "前台看共享方案 is_owner=false（只读标记）");
+      assert(frontSeesShared.version === 3, "前台看到的版本号也是 v3（前后端对齐）");
+      assert(frontSeesShared.filters.type === "轮椅", "前台看到的筛选条件也是 type=轮椅（前后端对齐）");
+      assert(frontSeesShared.updated_at !== null && frontSeesShared.updated_at !== undefined,
+        "前台也能看到 updated_at 更新时间");
+
+      // 30.5.2 前台用户可以套用（apply）该方案
+      const applyRes = await req(
+        `/api/views/${sharedViewId}/apply`,
+        "POST", {}, frontToken
+      );
+      assert(applyRes.success === true, "前台可以成功套用共享方案");
+      assert(applyRes.data.id === sharedViewId, "套用后返回方案 id 正确");
+      assert(applyRes.data.filters.status === "available", "套用返回的筛选条件正确");
+
+      // 30.5.3 前台用户尝试更新 → 403（后端拦截，前端无越权入口）
+      let frontUpdateErrStatus = 0;
+      try {
+        await req(`/api/views/${sharedViewId}`, "PUT", {
+          filters: { status: "borrowed" },
+          expected_version: 3,
+        }, frontToken);
+      } catch (e) {
+        frontUpdateErrStatus = e.status;
+      }
+      assert(frontUpdateErrStatus === 403, "前台尝试更新共享方案 → 403 拒绝（后端拦截）");
+
+      // 30.5.4 前台用户尝试删除 → 403
+      let frontDeleteErrStatus = 0;
+      try {
+        await req(`/api/views/${sharedViewId}`, "DELETE", null, frontToken);
+      } catch (e) {
+        frontDeleteErrStatus = e.status;
+      }
+      assert(frontDeleteErrStatus === 403, "前台尝试删除共享方案 → 403 拒绝（后端拦截）");
+
+      // 30.5.5 前台用户尝试回滚 → 403
+      let frontRollbackErrStatus = 0;
+      try {
+        await req(
+          `/api/views/${sharedViewId}/rollback/${snapV1.id}`,
+          "POST", {}, frontToken
+        );
+      } catch (e) {
+        frontRollbackErrStatus = e.status;
+      }
+      assert(frontRollbackErrStatus === 403, "前台尝试回滚共享方案 → 403 拒绝（后端拦截）");
+
+      // 30.5.6 前台用户尝试查看快照 → 403（非所有者非管理员）
+      let frontSnapErrStatus = 0;
+      try {
+        await req(`/api/views/${sharedViewId}/snapshots`, "GET", null, frontToken);
+      } catch (e) {
+        frontSnapErrStatus = e.status;
+      }
+      assert(frontSnapErrStatus === 403, "前台尝试查看他人方案快照 → 403 拒绝");
+
+      // 30.5.7 前台用户可以另存为自己的新方案（不影响共享方案）
+      const frontSaved = await req("/api/views", "POST", {
+        page: "equipments",
+        name: `前台套用后另存-${Date.now()}`,
+        filters: { status: "available", type: "轮椅" },
+        sort_by: "name",
+        sort_order: "asc",
+        page_size: 20,
+      }, frontToken);
+      assert(frontSaved.success === true, "前台可以套用后另存为自己的方案（不修改共享内容）");
+      assert(frontSaved.data.is_owner === true, "前台另存的方案 is_owner=true（自己可以改）");
+
+      try {
+        // 30.5.8 前台可以正常更新自己另存的方案（自己的可改）
+        const frontOwnUpdate = await req(`/api/views/${frontSaved.data.id}`, "PUT", {
+          filters: { status: "borrowed" },
+          expected_version: 1,
+        }, frontToken);
+        assert(frontOwnUpdate.success === true, "前台可以正常更新自己的方案（自己的有编辑权）");
+        assert(frontOwnUpdate.data.version === 2, "前台自己的方案更新后版本号 = 2");
+      } finally {
+        await req(`/api/views/${frontSaved.data.id}`, "DELETE", null, frontToken).catch(() => {});
+      }
+
+      // === 30.6 并发冲突：两个窗口同时编辑同一方案 → 后提交方看到清晰提示 ===
+      // 先刷新回 v4（以便设置不同的 expected_version）
+      await req(`/api/views/${sharedViewId}`, "PUT", {
+        filters: { status: "borrowed" },
+        expected_version: 3,
+        snapshot_remark: "先改到 v4 做冲突测试",
+      }, adminToken);
+
+      // 模拟窗口 A：拿着旧的版本号 v3 来提交 → 冲突
+      let conflictCaught = null;
+      try {
+        await req(`/api/views/${sharedViewId}`, "PUT", {
+          filters: { name: "雾化器" },
+          expected_version: 3, // 故意用过时的版本号
+          snapshot_remark: "窗口 A 用旧版本号提交",
+        }, adminToken);
+      } catch (e) {
+        conflictCaught = e;
+      }
+      assert(conflictCaught !== null && conflictCaught.status === 409,
+        "后提交方（版本号过时）收到 409 Conflict");
+      assert(conflictCaught.body.error && conflictCaught.body.error.includes("已被他人修改"),
+        `错误提示包含「已被他人修改」: ${conflictCaught.body.error}`);
+      assert(conflictCaught.body.conflict !== undefined,
+        "响应体包含 conflict 字段，前端可以据此展示冲突对话框");
+      assert(conflictCaught.body.conflict.submitted_version === 3,
+        "conflict.submitted_version = 3（我提交的版本号）");
+      assert(conflictCaught.body.conflict.latest_version === 4,
+        "conflict.latest_version = 4（实际最新版本号）");
+      assert(conflictCaught.body.conflict.latest_updated_at !== undefined,
+        "conflict 包含 latest_updated_at 最新更新时间");
+      assert(conflictCaught.body.conflict.latest_operator !== undefined,
+        "conflict 包含 latest_operator 修改者信息");
+      assert(conflictCaught.body.conflict.latest_operator.operator_name !== undefined,
+        "conflict.latest_operator.operator_name 存在，可展示是谁改的");
+
+      // === 30.7 关键操作全部写入操作日志 ===
+      // 管理员用 include_all=true 可以查看到跨用户的所有操作（包括前台用户的套用）
+      // 同时也用前台用户查自己的日志，双重保险，避免日志过多挤掉
+      const adminLogs = await req("/api/views/logs?limit=2000&include_all=true", "GET", null, adminToken);
+      const frontLogs = await req("/api/views/logs?limit=2000", "GET", null, frontToken);
+      const allRelatedLogs = [
+        ...adminLogs.data.filter((l) => l.view_name === sharedViewName),
+        ...frontLogs.data.filter((l) => l.view_name === sharedViewName),
+      ];
+      const logIds = new Set(allRelatedLogs.map((l) => l.id));
+      const relatedLogs = allRelatedLogs.filter((l) => logIds.has(l.id) && (logIds.delete(l.id) || true));
+      const actions = relatedLogs.map((l) => l.action);
+      assert(actions.includes("create"), "操作日志包含 create");
+      assert(actions.includes("update"), "操作日志包含 update（保存新版本）");
+      assert(actions.includes("apply"), "操作日志包含 apply（前台套用）");
+      assert(actions.includes("rollback"), "操作日志包含 rollback（撤销）");
+      assert(actions.includes("snapshot"), "操作日志包含 snapshot（自动快照或手动）");
+      assert(actions.includes("conflict"), "操作日志包含 conflict（冲突检测）");
+
+      // 日志中有操作者信息
+      const createLog = relatedLogs.find((l) => l.action === "create");
+      assert(createLog.operator_id === 1 || createLog.operator_name === "admin",
+        "create 日志有正确的操作者信息（admin）");
+      assert(createLog.detail && createLog.detail.length > 0,
+        "create 日志 detail 不为空，可追查改了什么");
+
+      const rollbackLog = relatedLogs.find((l) => l.action === "rollback");
+      assert(rollbackLog.detail && rollbackLog.detail.includes("回滚"),
+        "rollback 日志 detail 包含「回滚」字样，可追溯");
+
+    } finally {
+      await req(`/api/views/${sharedViewId}`, "DELETE", null, adminToken).catch(() => {});
     }
   });
 

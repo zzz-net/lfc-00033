@@ -282,9 +282,10 @@ export const api = {
       { method: "POST" }
     ),
 
-  getViewLogs: (limit?: number) => {
+  getViewLogs: (limit?: number, includeAll?: boolean) => {
     const qs = new URLSearchParams();
     if (limit) qs.set("limit", String(limit));
+    if (includeAll) qs.set("include_all", "true");
     return request<ViewOperationLog[]>(`/views/logs?${qs.toString()}`);
   },
 };

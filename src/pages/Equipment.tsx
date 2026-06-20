@@ -129,6 +129,10 @@ export default function EquipmentPage() {
   const [snapshots, setSnapshots] = useState<ViewSnapshot[]>([]);
   const [snapshotsLoading, setSnapshotsLoading] = useState(false);
   const [snapshotTargetView, setSnapshotTargetView] = useState<SavedView | null>(null);
+  const [viewModified, setViewModified] = useLocalStorage<boolean>(
+    "equipment_view_modified",
+    false
+  );
 
   const [showModal, setShowModal] = useState(false);
   const [editItem, setEditItem] = useState<Equipment | null>(null);
@@ -188,6 +192,7 @@ export default function EquipmentPage() {
     setAppliedReadOnlyView(null);
     setAppliedReadOnlyViewId(null);
     setActiveViewVersion(null);
+    setViewModified(false);
   }, [
     setStatusFilter,
     setNameSearch,
@@ -201,7 +206,49 @@ export default function EquipmentPage() {
     setAppliedReadOnlyView,
     setAppliedReadOnlyViewId,
     setActiveViewVersion,
+    setViewModified,
   ]);
+
+  const currentFiltersMatchView = useCallback(
+    (view: SavedView | null): boolean => {
+      if (!view) return false;
+      const f = view.filters;
+      if ((f.status || "") !== statusFilter) return false;
+      if ((f.name || "") !== nameSearch) return false;
+      if ((f.type || "") !== typeFilter) return false;
+      if ((view.sort_by || null) !== sortBy) return false;
+      if ((view.sort_order || "desc") !== sortOrder) return false;
+      if ((view.page_size || 20) !== pageSize) return false;
+      const vc = view.visible_columns || DEFAULT_VISIBLE_COLUMNS;
+      if (vc.length !== visibleColumns.length) return false;
+      if (!vc.every((c) => visibleColumns.includes(c))) return false;
+      return true;
+    },
+    [statusFilter, nameSearch, typeFilter, sortBy, sortOrder, pageSize, visibleColumns]
+  );
+
+  const markViewModifiedIfNeeded = useCallback(() => {
+    const currentView = activeViewId
+      ? savedViews.find((v) => v.id === activeViewId) || null
+      : appliedReadOnlyView;
+    if (currentView) {
+      const matches = currentFiltersMatchView(currentView);
+      setViewModified(!matches);
+    } else {
+      setViewModified(false);
+    }
+  }, [activeViewId, savedViews, appliedReadOnlyView, currentFiltersMatchView, setViewModified]);
+
+  const revertToViewOriginal = useCallback(() => {
+    const currentView = activeViewId
+      ? savedViews.find((v) => v.id === activeViewId) || null
+      : appliedReadOnlyView;
+    if (currentView) {
+      applyViewToState(currentView);
+      setViewModified(false);
+      toast("已恢复到方案原始条件", "success");
+    }
+  }, [activeViewId, savedViews, appliedReadOnlyView, applyViewToState, setViewModified]);
 
   useEffect(() => {
     if (!user) return;
@@ -219,6 +266,7 @@ export default function EquipmentPage() {
           setAppliedReadOnlyView(matched);
           setActiveViewId(null);
           setActiveViewVersion(null);
+          setViewModified(false);
           return;
         }
       }
@@ -228,6 +276,7 @@ export default function EquipmentPage() {
         if (matched) {
           applyViewToState(matched);
           setActiveViewVersion(matched.version);
+          setViewModified(false);
           return;
         }
       }
@@ -237,12 +286,14 @@ export default function EquipmentPage() {
         applyViewToState(defaultView);
         setActiveViewId(defaultView.id);
         setActiveViewVersion(defaultView.version);
+        setViewModified(false);
         return;
       }
 
       setActiveViewId(null);
       setAppliedReadOnlyViewId(null);
       setActiveViewVersion(null);
+      setViewModified(false);
     };
 
     init();
@@ -276,6 +327,10 @@ export default function EquipmentPage() {
   useEffect(() => {
     fetchEquipments();
   }, [fetchEquipments]);
+
+  useEffect(() => {
+    markViewModifiedIfNeeded();
+  }, [markViewModifiedIfNeeded]);
 
   const handleRowClick = async (id: number) => {
     setShowDrawer(true);
@@ -336,10 +391,7 @@ export default function EquipmentPage() {
       setSortBy(col);
       setSortOrder("asc");
     }
-    setActiveViewId(null);
-    setAppliedReadOnlyView(null);
-    setAppliedReadOnlyViewId(null);
-    setActiveViewVersion(null);
+    // 不切回默认方案，仅标记 modified（由 useEffect 自动处理）
   };
 
   const handleSaveView = async () => {
@@ -371,6 +423,7 @@ export default function EquipmentPage() {
       setActiveViewVersion(newView.version);
       setAppliedReadOnlyView(null);
       setAppliedReadOnlyViewId(null);
+      setViewModified(false);
       await loadViews();
     } catch (err: unknown) {
       toast(err instanceof Error ? err.message : "保存失败", "error");
@@ -418,6 +471,7 @@ export default function EquipmentPage() {
       setShowUpdateRemarkDialog(false);
       setSnapshotTargetView(null);
       setUpdateRemark("");
+      setViewModified(false);
       await loadViews();
     } catch (err: any) {
       if (err?.conflict) {
@@ -460,12 +514,14 @@ export default function EquipmentPage() {
         setActiveViewVersion(view.version);
         setAppliedReadOnlyView(null);
         setAppliedReadOnlyViewId(null);
+        setViewModified(false);
         toast(`已应用方案「${view.name}」(v${view.version})`, "success");
       } else {
         setActiveViewId(null);
         setActiveViewVersion(null);
         setAppliedReadOnlyView(view);
         setAppliedReadOnlyViewId(view.id);
+        setViewModified(false);
         toast(`已套用他人方案「${view.name}」（只读，如需保存请另存为新方案）`, "info");
       }
       setShowViewDropdown(false);
@@ -513,6 +569,7 @@ export default function EquipmentPage() {
       }
       setShowSnapshotDialog(false);
       setSnapshotTargetView(null);
+      setViewModified(false);
       await loadViews();
       fetchEquipments();
     } catch (err: unknown) {
@@ -544,10 +601,7 @@ export default function EquipmentPage() {
     } else {
       setVisibleColumns([...visibleColumns, col]);
     }
-    setActiveViewId(null);
-    setAppliedReadOnlyView(null);
-    setAppliedReadOnlyViewId(null);
-    setActiveViewVersion(null);
+    // 不切回默认方案，仅标记 modified（由 useEffect 自动处理）
   };
 
   const uniqueTypes = useMemo(
@@ -578,16 +632,37 @@ export default function EquipmentPage() {
 
   const currentViewDisplay = () => {
     if (activeView) {
+      const modifiedBadge = viewModified ? (
+        <span className="ml-1.5 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-100 text-amber-700 border border-amber-200">
+          已修改
+        </span>
+      ) : null;
       return {
         icon: <Bookmark className="w-4 h-4 text-teal-700" />,
-        text: `${activeView.name} (v${activeView.version})`,
+        text: (
+          <>
+            {activeView.name} <span className="font-mono text-xs opacity-80">v{activeView.version}</span>
+            {modifiedBadge}
+          </>
+        ),
         textClass: "text-teal-700 font-medium",
       };
     }
     if (appliedReadOnlyView) {
+      const modifiedBadge = viewModified ? (
+        <span className="ml-1.5 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-100 text-amber-700 border border-amber-200">
+          已修改
+        </span>
+      ) : null;
       return {
         icon: <Bookmark className="w-4 h-4 text-gray-500" />,
-        text: `${appliedReadOnlyView.name}（只读）`,
+        text: (
+          <>
+            {appliedReadOnlyView.name}
+            <span className="ml-1 text-xs opacity-70">（只读）</span>
+            {modifiedBadge}
+          </>
+        ),
         textClass: "text-gray-600",
       };
     }
@@ -597,6 +672,115 @@ export default function EquipmentPage() {
       textClass: "",
     };
   };
+
+  const currentViewForPanel = activeView || appliedReadOnlyView;
+
+  const viewInfoPanel = currentViewForPanel ? (
+    <div className="bg-gradient-to-r from-teal-50 to-white border border-teal-100 rounded-xl p-4 shadow-sm">
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div className="flex-1 min-w-0 space-y-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="flex items-center gap-2">
+              <Bookmark
+                className={`w-5 h-5 ${
+                  currentViewForPanel.is_owner ? "text-teal-600" : "text-gray-500"
+                }`}
+              />
+              <span
+                className={`text-base font-semibold ${
+                  currentViewForPanel.is_owner ? "text-teal-900" : "text-gray-700"
+                }`}
+              >
+                {currentViewForPanel.name}
+              </span>
+            </div>
+            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono font-medium bg-teal-100 text-teal-700">
+              v{currentViewForPanel.version}
+            </span>
+            {!currentViewForPanel.is_owner && (
+              <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600 border border-gray-200">
+                只读共享
+              </span>
+            )}
+            {viewModified && (
+              <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700 border border-amber-200">
+                <AlertTriangle className="w-3 h-3 mr-1" />
+                当前条件已偏离方案
+              </span>
+            )}
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
+            <div className="flex items-center gap-1.5 text-gray-600">
+              <Clock className="w-3.5 h-3.5 text-gray-400" />
+              <span>更新于 {currentViewForPanel.updated_at}</span>
+            </div>
+            <div className="flex items-center gap-1.5 text-gray-600">
+              <User className="w-3.5 h-3.5 text-gray-400" />
+              <span>
+                {currentViewForPanel.is_owner
+                  ? "我创建的方案"
+                  : `他人共享方案`}
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5 text-gray-600">
+              <Settings className="w-3.5 h-3.5 text-gray-400" />
+              <span>
+                排序: {currentViewForPanel.sort_by
+                  ? `${currentViewForPanel.sort_by} ${currentViewForPanel.sort_order || "desc"}`
+                  : "默认"}
+                {" · "}分页: {currentViewForPanel.page_size || 20}/页
+              </span>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap text-xs">
+            <span className="text-gray-500">当前筛选条件:</span>
+            {Object.keys(currentViewForPanel.filters).length === 0 ? (
+              <span className="text-gray-400 italic">（无筛选）</span>
+            ) : (
+              Object.entries(currentViewForPanel.filters).map(([k, v]) => (
+                <span
+                  key={k}
+                  className="inline-flex items-center px-2 py-0.5 rounded bg-white border border-gray-200 text-gray-700"
+                >
+                  <span className="text-gray-500 mr-1">{k}:</span>
+                  <span className="font-medium">{String(v)}</span>
+                </span>
+              ))
+            )}
+          </div>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          {viewModified && (
+            <button
+              onClick={revertToViewOriginal}
+              className="px-3 py-1.5 text-xs bg-white border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-50 flex items-center gap-1"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              撤销修改
+            </button>
+          )}
+          {currentViewForPanel.is_owner && (
+            <>
+              <button
+                onClick={() => openSnapshotDialog(currentViewForPanel)}
+                className="px-3 py-1.5 text-xs bg-white border border-indigo-200 text-indigo-700 rounded-lg hover:bg-indigo-50 flex items-center gap-1"
+              >
+                <History className="w-3.5 h-3.5" />
+                版本历史
+              </button>
+              <button
+                onClick={handleUpdateView}
+                className="px-3 py-1.5 text-xs bg-teal-700 text-white rounded-lg hover:bg-teal-800 flex items-center gap-1"
+              >
+                <Save className="w-3.5 h-3.5" />
+                保存为新版本
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  ) : null;
 
   return (
     <div className="space-y-4">
@@ -878,6 +1062,8 @@ export default function EquipmentPage() {
         </div>
       </div>
 
+      {viewInfoPanel}
+
       <div className="bg-white rounded-xl shadow-sm border border-gray-100">
         <div className="px-5 py-4 border-b border-gray-100 flex flex-wrap items-center gap-3">
           <div className="flex gap-1">
@@ -887,10 +1073,7 @@ export default function EquipmentPage() {
                 onClick={() => {
                   setStatusFilter(tab.value);
                   setCurrentPage(1);
-                  setActiveViewId(null);
-                  setAppliedReadOnlyView(null);
-                  setAppliedReadOnlyViewId(null);
-                  setActiveViewVersion(null);
+                  // 不切回默认方案，仅标记 modified（由 useEffect 自动处理）
                 }}
                 className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
                   statusFilter === tab.value
@@ -912,10 +1095,7 @@ export default function EquipmentPage() {
                 onChange={(e) => {
                   setNameSearch(e.target.value);
                   setCurrentPage(1);
-                  setActiveViewId(null);
-                  setAppliedReadOnlyView(null);
-                  setAppliedReadOnlyViewId(null);
-                  setActiveViewVersion(null);
+                  // 不切回默认方案，仅标记 modified（由 useEffect 自动处理）
                 }}
                 placeholder="搜索设备名称"
                 className="pl-8 pr-3 py-1.5 border border-gray-300 rounded-lg text-sm w-44"
@@ -926,9 +1106,7 @@ export default function EquipmentPage() {
               onChange={(e) => {
                 setTypeFilter(e.target.value);
                 setCurrentPage(1);
-                setActiveViewId(null);
-                setAppliedReadOnlyView(null);
-                setActiveViewVersion(null);
+                // 不切回默认方案，仅标记 modified（由 useEffect 自动处理）
               }}
               className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm bg-white"
             >
@@ -1096,9 +1274,7 @@ export default function EquipmentPage() {
               onChange={(e) => {
                 setPageSize(Number(e.target.value));
                 setCurrentPage(1);
-                setActiveViewId(null);
-                setAppliedReadOnlyView(null);
-                setActiveViewVersion(null);
+                // 不切回默认方案，仅标记 modified（由 useEffect 自动处理）
               }}
               className="px-2 py-1 border border-gray-300 rounded text-sm bg-white"
             >

@@ -111,11 +111,23 @@ router.get('/', authMiddleware, (req: Request, res: Response): void => {
 
 router.get('/logs', authMiddleware, (req: Request, res: Response): void => {
   const userId = req.user!.id
-  const { limit = 50 } = req.query
+  const isAdmin = req.user!.role === 'admin'
+  const { limit = 200, include_all = 'false' } = req.query
 
-  const rows = db
-    .prepare('SELECT * FROM view_operation_logs WHERE operator_id = ? ORDER BY created_at DESC LIMIT ?')
-    .all(userId, Number(limit))
+  const includeAll = isAdmin && include_all === 'true'
+
+  let sql = 'SELECT * FROM view_operation_logs'
+  const params: unknown[] = []
+
+  if (!includeAll) {
+    sql += ' WHERE operator_id = ?'
+    params.push(userId)
+  }
+
+  sql += ' ORDER BY created_at DESC LIMIT ?'
+  params.push(Number(limit))
+
+  const rows = db.prepare(sql).all(...params)
 
   res.json({ success: true, data: rows })
 })
