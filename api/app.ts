@@ -16,6 +16,7 @@ import equipmentRoutes from './routes/equipments.js'
 import borrowRoutes from './routes/borrows.js'
 import depositRoutes from './routes/deposits.js'
 import exportRoutes from './routes/export.js'
+import viewRoutes from './routes/views.js'
 import './db.js'
 
 // for esm mode
@@ -39,6 +40,7 @@ app.use('/api/equipments', equipmentRoutes)
 app.use('/api/borrows', borrowRoutes)
 app.use('/api/deposits', depositRoutes)
 app.use('/api/export', exportRoutes)
+app.use('/api/views', viewRoutes)
 
 /**
  * health

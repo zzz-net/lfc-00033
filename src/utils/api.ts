@@ -5,6 +5,9 @@ import type {
   EquipmentDetail,
   BorrowRecord,
   DepositTransaction,
+  SavedView,
+  ViewOperationLog,
+  PaginatedEquipments,
 } from "@/types";
 
 const BASE_URL = "/api";
@@ -90,13 +93,25 @@ export const api = {
 
   getMe: () => request<User>("/auth/me"),
 
-  getEquipments: (params?: { status?: string; name?: string; type?: string }) => {
+  getEquipments: (params?: {
+    status?: string;
+    name?: string;
+    type?: string;
+    sort_by?: string;
+    sort_order?: "asc" | "desc";
+    page?: number;
+    page_size?: number;
+  }) => {
     const qs = new URLSearchParams();
     if (params?.status) qs.set("status", params.status);
     if (params?.name) qs.set("name", params.name);
     if (params?.type) qs.set("type", params.type);
+    if (params?.sort_by) qs.set("sort_by", params.sort_by);
+    if (params?.sort_order) qs.set("sort_order", params.sort_order);
+    if (params?.page) qs.set("page", String(params.page));
+    if (params?.page_size) qs.set("page_size", String(params.page_size));
     const query = qs.toString();
-    return request<Equipment[]>(`/equipments${query ? `?${query}` : ""}`);
+    return request<PaginatedEquipments>(`/equipments${query ? `?${query}` : ""}`);
   },
 
   createEquipment: (data: Partial<Equipment>) =>
@@ -175,10 +190,70 @@ export const api = {
     );
   },
 
-  exportEquipments: (params?: { status?: string; name?: string; type?: string }) =>
+  exportEquipments: (params?: {
+    status?: string;
+    name?: string;
+    type?: string;
+    sort_by?: string;
+    sort_order?: "asc" | "desc";
+  }) =>
     downloadFile("/export/equipments", "设备台账.csv", params as Record<string, string>),
   exportBorrows: (params?: { status?: string; borrower_name?: string; equipment_name?: string }) =>
     downloadFile("/export/borrows", "借还记录.csv", params as Record<string, string>),
   exportDeposits: (params?: { borrower_name?: string; equipment_name?: string; type?: string }) =>
     downloadFile("/export/deposits", "押金流水.csv", params as Record<string, string>),
+
+  getViews: (page: string = "equipments") => {
+    const qs = new URLSearchParams();
+    qs.set("page", page);
+    return request<SavedView[]>(`/views?${qs.toString()}`);
+  },
+
+  createView: (data: {
+    page?: string;
+    name: string;
+    filters: Record<string, string>;
+    sort_by?: string | null;
+    sort_order?: "asc" | "desc" | null;
+    page_size?: number;
+    visible_columns?: string[] | null;
+    is_default?: boolean;
+  }) =>
+    request<SavedView>("/views", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  updateView: (
+    id: number,
+    data: {
+      name?: string;
+      filters?: Record<string, string>;
+      sort_by?: string | null;
+      sort_order?: "asc" | "desc" | null;
+      page_size?: number;
+      visible_columns?: string[] | null;
+      is_default?: boolean;
+    }
+  ) =>
+    request<SavedView>(`/views/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+
+  deleteView: (id: number) =>
+    request<void>(`/views/${id}`, {
+      method: "DELETE",
+    }),
+
+  applyView: (id: number) =>
+    request<SavedView>(`/views/${id}/apply`, {
+      method: "POST",
+    }),
+
+  getViewLogs: (limit?: number) => {
+    const qs = new URLSearchParams();
+    if (limit) qs.set("limit", String(limit));
+    return request<ViewOperationLog[]>(`/views/logs?${qs.toString()}`);
+  },
 };

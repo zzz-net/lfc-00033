@@ -5,28 +5,45 @@ import { authMiddleware, adminMiddleware } from '../middleware/auth.js'
 const router = Router()
 
 router.get('/', (req: Request, res: Response): void => {
-  const { status, name, type } = req.query
+  const { status, name, type, sort_by, sort_order, page, page_size } = req.query
 
-  let sql = 'SELECT * FROM equipments WHERE 1=1'
+  let whereSql = ' WHERE 1=1'
   const params: unknown[] = []
 
   if (status) {
-    sql += ' AND status = ?'
+    whereSql += ' AND status = ?'
     params.push(status)
   }
   if (name) {
-    sql += ' AND name LIKE ?'
+    whereSql += ' AND name LIKE ?'
     params.push(`%${name}%`)
   }
   if (type) {
-    sql += ' AND type = ?'
+    whereSql += ' AND type = ?'
     params.push(type)
   }
 
-  sql += ' ORDER BY created_at DESC'
+  const validSortColumns = ['id', 'name', 'type', 'status', 'deposit_amount', 'created_at', 'updated_at']
+  const sortBy = validSortColumns.includes(String(sort_by)) ? String(sort_by) : 'created_at'
+  const sortOrder = sort_order === 'asc' ? 'ASC' : 'DESC'
+  const orderSql = ` ORDER BY ${sortBy} ${sortOrder}`
 
-  const rows = db.prepare(sql).all(...params)
-  res.json({ success: true, data: rows })
+  const countRow = db.prepare('SELECT COUNT(*) as total FROM equipments' + whereSql).get(...params) as { total: number }
+
+  let dataSql = 'SELECT * FROM equipments' + whereSql + orderSql
+  const dataParams = [...params]
+
+  let pageNum = 1
+  let pageSize = countRow.total
+  if (page_size && Number(page_size) > 0) {
+    pageSize = Number(page_size)
+    pageNum = Math.max(1, Number(page) || 1)
+    dataSql += ' LIMIT ? OFFSET ?'
+    dataParams.push(pageSize, (pageNum - 1) * pageSize)
+  }
+
+  const rows = db.prepare(dataSql).all(...dataParams)
+  res.json({ success: true, data: rows, total: countRow.total, page: pageNum, page_size: pageSize })
 })
 
 router.post('/', authMiddleware, adminMiddleware, (req: Request, res: Response): void => {

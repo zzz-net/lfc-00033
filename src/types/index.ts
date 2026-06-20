@@ -66,3 +66,42 @@ export interface LoginResponse {
   token: string;
   user: User;
 }
+
+export interface SavedViewFilters {
+  status?: string;
+  name?: string;
+  type?: string;
+}
+
+export interface SavedView {
+  id: number;
+  user_id: number;
+  page: string;
+  name: string;
+  filters: SavedViewFilters;
+  sort_by: string | null;
+  sort_order: "asc" | "desc" | null;
+  page_size: number;
+  visible_columns: string[] | null;
+  is_default: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ViewOperationLog {
+  id: number;
+  view_id: number | null;
+  view_name: string;
+  action: "create" | "update" | "delete" | "apply";
+  operator_id: number;
+  operator_name: string;
+  detail: string;
+  created_at: string;
+}
+
+export interface PaginatedEquipments {
+  data: Equipment[];
+  total: number;
+  page: number;
+  page_size: number;
+}

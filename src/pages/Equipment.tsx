@@ -1,11 +1,32 @@
-import { useState, useEffect, useCallback } from "react";
-import { Plus, Search, Download } from "lucide-react";
+import { useState, useEffect, useCallback, useMemo } from "react";
+import {
+  Plus,
+  Search,
+  Download,
+  Save,
+  Trash2,
+  ChevronDown,
+  ChevronUp,
+  ChevronLeft,
+  ChevronRight,
+  Settings,
+  RotateCcw,
+  BookmarkPlus,
+  Bookmark,
+  X,
+  Check,
+  ArrowUpDown,
+} from "lucide-react";
 import { api } from "@/utils/api";
 import { useAuthStore } from "@/store/authStore";
 import { toast } from "@/components/Toast";
-import { formatAmount, EQUIPMENT_STATUS_LABELS, EQUIPMENT_STATUS_COLORS } from "@/utils/helpers";
+import {
+  formatAmount,
+  EQUIPMENT_STATUS_LABELS,
+  EQUIPMENT_STATUS_COLORS,
+} from "@/utils/helpers";
 import { useLocalStorage } from "@/hooks/useLocalStorage";
-import type { Equipment } from "@/types";
+import type { Equipment, SavedView } from "@/types";
 import EquipmentModal from "@/components/EquipmentModal";
 import EquipmentDetailDrawer from "@/components/EquipmentDetailDrawer";
 
@@ -17,15 +38,75 @@ const STATUS_TABS = [
   { value: "pending_confirm", label: "待确认" },
 ];
 
+const ALL_COLUMNS = [
+  { key: "name", label: "名称" },
+  { key: "type", label: "类型" },
+  { key: "status", label: "状态" },
+  { key: "deposit_amount", label: "押金金额" },
+  { key: "notes", label: "备注" },
+  { key: "created_at", label: "创建时间" },
+];
+
+const DEFAULT_VISIBLE_COLUMNS = ["name", "type", "status", "deposit_amount"];
+
+interface EquipmentsResponse {
+  data: Equipment[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
 export default function EquipmentPage() {
   const { user } = useAuthStore();
   const isAdmin = user?.role === "admin";
 
   const [equipments, setEquipments] = useState<Equipment[]>([]);
+  const [totalCount, setTotalCount] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [statusFilter, setStatusFilter] = useLocalStorage<string>("equipment_filter_status", "");
-  const [nameSearch, setNameSearch] = useLocalStorage<string>("equipment_filter_name", "");
-  const [typeFilter, setTypeFilter] = useLocalStorage<string>("equipment_filter_type", "");
+
+  const [statusFilter, setStatusFilter] = useLocalStorage<string>(
+    "equipment_filter_status",
+    ""
+  );
+  const [nameSearch, setNameSearch] = useLocalStorage<string>(
+    "equipment_filter_name",
+    ""
+  );
+  const [typeFilter, setTypeFilter] = useLocalStorage<string>(
+    "equipment_filter_type",
+    ""
+  );
+  const [sortBy, setSortBy] = useLocalStorage<string | null>(
+    "equipment_sort_by",
+    null
+  );
+  const [sortOrder, setSortOrder] = useLocalStorage<"asc" | "desc">(
+    "equipment_sort_order",
+    "desc"
+  );
+  const [currentPage, setCurrentPage] = useLocalStorage<number>(
+    "equipment_page",
+    1
+  );
+  const [pageSize, setPageSize] = useLocalStorage<number>(
+    "equipment_page_size",
+    20
+  );
+  const [visibleColumns, setVisibleColumns] = useLocalStorage<string[]>(
+    "equipment_visible_columns",
+    DEFAULT_VISIBLE_COLUMNS
+  );
+
+  const [savedViews, setSavedViews] = useState<SavedView[]>([]);
+  const [activeViewId, setActiveViewId] = useLocalStorage<number | null>(
+    "equipment_active_view_id",
+    null
+  );
+  const [showViewDropdown, setShowViewDropdown] = useState(false);
+  const [showSaveDialog, setShowSaveDialog] = useState(false);
+  const [showColumnMenu, setShowColumnMenu] = useState(false);
+  const [saveViewName, setSaveViewName] = useState("");
+  const [saveAsDefault, setSaveAsDefault] = useState(false);
 
   const [showModal, setShowModal] = useState(false);
   const [editItem, setEditItem] = useState<Equipment | null>(null);
@@ -33,21 +114,110 @@ export default function EquipmentPage() {
   const [drawerDetail, setDrawerDetail] = useState<any>(null);
   const [drawerLoading, setDrawerLoading] = useState(false);
 
+  const loadViews = useCallback(async () => {
+    if (!user) return;
+    try {
+      const views = await api.getViews("equipments");
+      setSavedViews(views);
+    } catch (err) {
+      // toast(err instanceof Error ? err.message : "加载视图方案失败", "error");
+    }
+  }, [user]);
+
+  const applyViewToState = useCallback(
+    (view: SavedView) => {
+      setStatusFilter(view.filters.status || "");
+      setNameSearch(view.filters.name || "");
+      setTypeFilter(view.filters.type || "");
+      setSortBy(view.sort_by);
+      setSortOrder(view.sort_order || "desc");
+      setPageSize(view.page_size || 20);
+      setCurrentPage(1);
+      if (view.visible_columns && view.visible_columns.length > 0) {
+        setVisibleColumns(view.visible_columns);
+      } else {
+        setVisibleColumns(DEFAULT_VISIBLE_COLUMNS);
+      }
+      setActiveViewId(view.id);
+    },
+    [
+      setStatusFilter,
+      setNameSearch,
+      setTypeFilter,
+      setSortBy,
+      setSortOrder,
+      setPageSize,
+      setCurrentPage,
+      setVisibleColumns,
+      setActiveViewId,
+    ]
+  );
+
+  const resetToDefaultView = useCallback(() => {
+    setStatusFilter("");
+    setNameSearch("");
+    setTypeFilter("");
+    setSortBy(null);
+    setSortOrder("desc");
+    setPageSize(20);
+    setCurrentPage(1);
+    setVisibleColumns(DEFAULT_VISIBLE_COLUMNS);
+    setActiveViewId(null);
+  }, [
+    setStatusFilter,
+    setNameSearch,
+    setTypeFilter,
+    setSortBy,
+    setSortOrder,
+    setPageSize,
+    setCurrentPage,
+    setVisibleColumns,
+    setActiveViewId,
+  ]);
+
+  useEffect(() => {
+    if (!user) return;
+    loadViews().then(() => {
+      if (activeViewId) {
+        const matched = savedViews.find((v) => v.id === activeViewId);
+        if (matched) {
+          applyViewToState(matched);
+          return;
+        }
+      }
+      const defaultView = savedViews.find((v) => v.is_default);
+      if (defaultView) {
+        applyViewToState(defaultView);
+      }
+    });
+  }, [user]);
+
+  useEffect(() => {
+    if (user) {
+      loadViews();
+    }
+  }, [user, loadViews]);
+
   const fetchEquipments = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await api.getEquipments({
+      const res: EquipmentsResponse = await api.getEquipments({
         status: statusFilter || undefined,
         name: nameSearch || undefined,
         type: typeFilter || undefined,
+        sort_by: sortBy || undefined,
+        sort_order: sortOrder,
+        page: currentPage,
+        page_size: pageSize,
       });
-      setEquipments(data);
+      setEquipments(res.data);
+      setTotalCount(res.total);
     } catch (err: unknown) {
       toast(err instanceof Error ? err.message : "加载失败", "error");
     } finally {
       setLoading(false);
     }
-  }, [statusFilter, nameSearch, typeFilter]);
+  }, [statusFilter, nameSearch, typeFilter, sortBy, sortOrder, currentPage, pageSize]);
 
   useEffect(() => {
     fetchEquipments();
@@ -96,6 +266,8 @@ export default function EquipmentPage() {
         status: statusFilter,
         name: nameSearch,
         type: typeFilter,
+        sort_by: sortBy || undefined,
+        sort_order: sortOrder,
       });
       toast("导出成功", "success");
     } catch (err: unknown) {
@@ -103,13 +275,301 @@ export default function EquipmentPage() {
     }
   };
 
-  const uniqueTypes = [...new Set(equipments.map((e) => e.type))].filter(Boolean);
+  const handleSort = (col: string) => {
+    if (sortBy === col) {
+      setSortOrder(sortOrder === "asc" ? "desc" : "asc");
+    } else {
+      setSortBy(col);
+      setSortOrder("asc");
+    }
+    setActiveViewId(null);
+  };
+
+  const handleSaveView = async () => {
+    if (!saveViewName.trim()) {
+      toast("请输入方案名称", "error");
+      return;
+    }
+    try {
+      const filters: Record<string, string> = {};
+      if (statusFilter) filters.status = statusFilter;
+      if (nameSearch) filters.name = nameSearch;
+      if (typeFilter) filters.type = typeFilter;
+
+      const newView = await api.createView({
+        page: "equipments",
+        name: saveViewName.trim(),
+        filters,
+        sort_by: sortBy,
+        sort_order: sortOrder,
+        page_size: pageSize,
+        visible_columns: visibleColumns,
+        is_default: saveAsDefault,
+      });
+      toast(`方案「${newView.name}」保存成功`, "success");
+      setShowSaveDialog(false);
+      setSaveViewName("");
+      setSaveAsDefault(false);
+      setActiveViewId(newView.id);
+      await loadViews();
+    } catch (err: unknown) {
+      toast(err instanceof Error ? err.message : "保存失败", "error");
+    }
+  };
+
+  const handleUpdateView = async () => {
+    if (!activeViewId) return;
+    try {
+      const filters: Record<string, string> = {};
+      if (statusFilter) filters.status = statusFilter;
+      if (nameSearch) filters.name = nameSearch;
+      if (typeFilter) filters.type = typeFilter;
+
+      await api.updateView(activeViewId, {
+        filters,
+        sort_by: sortBy,
+        sort_order: sortOrder,
+        page_size: pageSize,
+        visible_columns: visibleColumns,
+      });
+      toast("当前方案已更新", "success");
+      await loadViews();
+    } catch (err: unknown) {
+      toast(err instanceof Error ? err.message : "更新失败", "error");
+    }
+  };
+
+  const handleDeleteView = async (viewId: number) => {
+    try {
+      await api.deleteView(viewId);
+      toast("方案已删除", "success");
+      if (viewId === activeViewId) {
+        resetToDefaultView();
+      }
+      await loadViews();
+    } catch (err: unknown) {
+      toast(err instanceof Error ? err.message : "删除失败", "error");
+    }
+  };
+
+  const handleApplyView = async (view: SavedView) => {
+    try {
+      await api.applyView(view.id);
+      applyViewToState(view);
+      setShowViewDropdown(false);
+    } catch (err: unknown) {
+      toast(err instanceof Error ? err.message : "应用方案失败", "error");
+    }
+  };
+
+  const toggleColumn = (col: string) => {
+    if (visibleColumns.includes(col)) {
+      if (visibleColumns.length > 1) {
+        setVisibleColumns(visibleColumns.filter((c) => c !== col));
+      } else {
+        toast("至少保留一列", "error");
+      }
+    } else {
+      setVisibleColumns([...visibleColumns, col]);
+    }
+    setActiveViewId(null);
+  };
+
+  const uniqueTypes = useMemo(
+    () => [...new Set(equipments.map((e) => e.type))].filter(Boolean),
+    [equipments]
+  );
+
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+  const activeView = savedViews.find((v) => v.id === activeViewId) || null;
+
+  const getSortIcon = (col: string) => {
+    if (sortBy !== col)
+      return <ArrowUpDown className="w-3.5 h-3.5 text-gray-400" />;
+    return sortOrder === "asc" ? (
+      <ChevronUp className="w-3.5 h-3.5 text-teal-700" />
+    ) : (
+      <ChevronDown className="w-3.5 h-3.5 text-teal-700" />
+    );
+  };
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-bold text-gray-900">设备台账</h1>
-        <div className="flex items-center gap-2">
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <h1 className="text-xl font-bold text-gray-900">
+          设备台账
+          {totalCount > 0 && (
+            <span className="ml-2 text-sm font-normal text-gray-500">
+              共 {totalCount} 条
+            </span>
+          )}
+        </h1>
+        <div className="flex items-center gap-2 flex-wrap">
+          <div className="relative">
+            <button
+              onClick={() => setShowViewDropdown(!showViewDropdown)}
+              className="btn-outline flex items-center gap-1.5 text-sm"
+            >
+              {activeView ? (
+                <>
+                  <Bookmark className="w-4 h-4 text-teal-700" />
+                  <span className="text-teal-700 font-medium">
+                    {activeView.name}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <BookmarkPlus className="w-4 h-4" />
+                  <span>视图方案</span>
+                </>
+              )}
+              <ChevronDown className="w-4 h-4" />
+            </button>
+            {showViewDropdown && (
+              <>
+                <div
+                  className="fixed inset-0 z-10"
+                  onClick={() => setShowViewDropdown(false)}
+                />
+                <div className="absolute right-0 top-full mt-1 w-64 bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-20">
+                  <div className="px-3 py-2 border-b border-gray-100">
+                    <button
+                      onClick={() => {
+                        resetToDefaultView();
+                        setShowViewDropdown(false);
+                      }}
+                      className={`w-full text-left px-2 py-1.5 rounded text-sm flex items-center gap-2 ${
+                        !activeViewId
+                          ? "bg-teal-50 text-teal-700 font-medium"
+                          : "text-gray-700 hover:bg-gray-50"
+                      }`}
+                    >
+                      <RotateCcw className="w-4 h-4" />
+                      默认视图
+                    </button>
+                  </div>
+                  {savedViews.length > 0 && (
+                    <div className="max-h-60 overflow-y-auto">
+                      {savedViews.map((view) => (
+                        <div
+                          key={view.id}
+                          className={`px-3 py-2 flex items-center justify-between group ${
+                            view.id === activeViewId ? "bg-teal-50" : "hover:bg-gray-50"
+                          }`}
+                        >
+                          <button
+                            onClick={() => handleApplyView(view)}
+                            className="flex-1 text-left flex items-center gap-1.5"
+                          >
+                            <Bookmark
+                              className={`w-4 h-4 ${
+                                view.id === activeViewId
+                                  ? "text-teal-700"
+                                  : "text-gray-400"
+                              }`}
+                            />
+                            <span
+                              className={`text-sm ${
+                                view.id === activeViewId
+                                  ? "text-teal-700 font-medium"
+                                  : "text-gray-700"
+                              }`}
+                            >
+                              {view.name}
+                            </span>
+                            {view.is_default && (
+                              <span className="text-xs text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">
+                                默认
+                              </span>
+                            )}
+                            {view.user_id !== user?.id && (
+                              <span className="text-xs text-gray-400">只读</span>
+                            )}
+                          </button>
+                          {view.user_id === user?.id && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (
+                                  confirm(`确定要删除方案「${view.name}」吗？`)
+                                ) {
+                                  handleDeleteView(view.id);
+                                }
+                              }}
+                              className="opacity-0 group-hover:opacity-100 p-1 text-gray-400 hover:text-red-500 transition-opacity"
+                              title="删除方案"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <div className="border-t border-gray-100 px-3 py-2 space-y-1">
+                    <button
+                      onClick={() => {
+                        setShowSaveDialog(true);
+                        setShowViewDropdown(false);
+                      }}
+                      className="w-full text-left px-2 py-1.5 rounded text-sm text-teal-700 hover:bg-teal-50 flex items-center gap-2"
+                    >
+                      <Save className="w-4 h-4" />
+                      另存为新方案...
+                    </button>
+                    {activeView && activeView.user_id === user?.id && (
+                      <button
+                        onClick={() => {
+                          handleUpdateView();
+                          setShowViewDropdown(false);
+                        }}
+                        className="w-full text-left px-2 py-1.5 rounded text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2"
+                      >
+                        <Check className="w-4 h-4" />
+                        更新当前方案
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+
+          <div className="relative">
+            <button
+              onClick={() => setShowColumnMenu(!showColumnMenu)}
+              className="btn-outline flex items-center gap-1.5 text-sm"
+              title="列显示设置"
+            >
+              <Settings className="w-4 h-4" />
+              列设置
+            </button>
+            {showColumnMenu && (
+              <>
+                <div
+                  className="fixed inset-0 z-10"
+                  onClick={() => setShowColumnMenu(false)}
+                />
+                <div className="absolute right-0 top-full mt-1 w-48 bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-20">
+                  {ALL_COLUMNS.map((col) => (
+                    <label
+                      key={col.key}
+                      className="flex items-center gap-2 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 cursor-pointer"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={visibleColumns.includes(col.key)}
+                        onChange={() => toggleColumn(col.key)}
+                        className="rounded border-gray-300 text-teal-700 focus:ring-teal-700"
+                      />
+                      {col.label}
+                    </label>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+
           {isAdmin && (
             <button
               onClick={handleExport}
@@ -140,7 +600,11 @@ export default function EquipmentPage() {
             {STATUS_TABS.map((tab) => (
               <button
                 key={tab.value}
-                onClick={() => setStatusFilter(tab.value)}
+                onClick={() => {
+                  setStatusFilter(tab.value);
+                  setCurrentPage(1);
+                  setActiveViewId(null);
+                }}
                 className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
                   statusFilter === tab.value
                     ? "bg-teal-700 text-white"
@@ -158,19 +622,29 @@ export default function EquipmentPage() {
               <input
                 type="text"
                 value={nameSearch}
-                onChange={(e) => setNameSearch(e.target.value)}
+                onChange={(e) => {
+                  setNameSearch(e.target.value);
+                  setCurrentPage(1);
+                  setActiveViewId(null);
+                }}
                 placeholder="搜索设备名称"
                 className="pl-8 pr-3 py-1.5 border border-gray-300 rounded-lg text-sm w-44"
               />
             </div>
             <select
               value={typeFilter}
-              onChange={(e) => setTypeFilter(e.target.value)}
+              onChange={(e) => {
+                setTypeFilter(e.target.value);
+                setCurrentPage(1);
+                setActiveViewId(null);
+              }}
               className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm bg-white"
             >
               <option value="">全部类型</option>
               {uniqueTypes.map((t) => (
-                <option key={t} value={t}>{t}</option>
+                <option key={t} value={t}>
+                  {t}
+                </option>
               ))}
             </select>
           </div>
@@ -180,23 +654,83 @@ export default function EquipmentPage() {
           <table className="w-full text-sm">
             <thead>
               <tr className="bg-gray-50 text-gray-600">
-                <th className="text-left px-5 py-3 font-medium">名称</th>
-                <th className="text-left px-5 py-3 font-medium">类型</th>
-                <th className="text-left px-5 py-3 font-medium">状态</th>
-                <th className="text-left px-5 py-3 font-medium">押金金额</th>
+                {visibleColumns.includes("name") && (
+                  <th
+                    className="text-left px-5 py-3 font-medium cursor-pointer select-none hover:bg-gray-100 transition-colors"
+                    onClick={() => handleSort("name")}
+                  >
+                    <span className="flex items-center gap-1">
+                      名称
+                      {getSortIcon("name")}
+                    </span>
+                  </th>
+                )}
+                {visibleColumns.includes("type") && (
+                  <th
+                    className="text-left px-5 py-3 font-medium cursor-pointer select-none hover:bg-gray-100 transition-colors"
+                    onClick={() => handleSort("type")}
+                  >
+                    <span className="flex items-center gap-1">
+                      类型
+                      {getSortIcon("type")}
+                    </span>
+                  </th>
+                )}
+                {visibleColumns.includes("status") && (
+                  <th
+                    className="text-left px-5 py-3 font-medium cursor-pointer select-none hover:bg-gray-100 transition-colors"
+                    onClick={() => handleSort("status")}
+                  >
+                    <span className="flex items-center gap-1">
+                      状态
+                      {getSortIcon("status")}
+                    </span>
+                  </th>
+                )}
+                {visibleColumns.includes("deposit_amount") && (
+                  <th
+                    className="text-left px-5 py-3 font-medium cursor-pointer select-none hover:bg-gray-100 transition-colors"
+                    onClick={() => handleSort("deposit_amount")}
+                  >
+                    <span className="flex items-center gap-1">
+                      押金金额
+                      {getSortIcon("deposit_amount")}
+                    </span>
+                  </th>
+                )}
+                {visibleColumns.includes("notes") && (
+                  <th className="text-left px-5 py-3 font-medium">备注</th>
+                )}
+                {visibleColumns.includes("created_at") && (
+                  <th
+                    className="text-left px-5 py-3 font-medium cursor-pointer select-none hover:bg-gray-100 transition-colors"
+                    onClick={() => handleSort("created_at")}
+                  >
+                    <span className="flex items-center gap-1">
+                      创建时间
+                      {getSortIcon("created_at")}
+                    </span>
+                  </th>
+                )}
                 <th className="text-left px-5 py-3 font-medium">操作</th>
               </tr>
             </thead>
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={5} className="text-center py-12 text-gray-400">
+                  <td
+                    colSpan={visibleColumns.length + 1}
+                    className="text-center py-12 text-gray-400"
+                  >
                     加载中...
                   </td>
                 </tr>
               ) : equipments.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="text-center py-12 text-gray-400">
+                  <td
+                    colSpan={visibleColumns.length + 1}
+                    className="text-center py-12 text-gray-400"
+                  >
                     暂无设备数据
                   </td>
                 </tr>
@@ -209,14 +743,38 @@ export default function EquipmentPage() {
                       idx % 2 === 1 ? "bg-gray-50/50" : ""
                     }`}
                   >
-                    <td className="px-5 py-3 font-medium text-gray-900">{eq.name}</td>
-                    <td className="px-5 py-3 text-gray-600">{eq.type}</td>
-                    <td className="px-5 py-3">
-                      <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${EQUIPMENT_STATUS_COLORS[eq.status]}`}>
-                        {EQUIPMENT_STATUS_LABELS[eq.status]}
-                      </span>
-                    </td>
-                    <td className="px-5 py-3 text-gray-900">{formatAmount(eq.deposit_amount)}</td>
+                    {visibleColumns.includes("name") && (
+                      <td className="px-5 py-3 font-medium text-gray-900">
+                        {eq.name}
+                      </td>
+                    )}
+                    {visibleColumns.includes("type") && (
+                      <td className="px-5 py-3 text-gray-600">{eq.type}</td>
+                    )}
+                    {visibleColumns.includes("status") && (
+                      <td className="px-5 py-3">
+                        <span
+                          className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${EQUIPMENT_STATUS_COLORS[eq.status]}`}
+                        >
+                          {EQUIPMENT_STATUS_LABELS[eq.status]}
+                        </span>
+                      </td>
+                    )}
+                    {visibleColumns.includes("deposit_amount") && (
+                      <td className="px-5 py-3 text-gray-900">
+                        {formatAmount(eq.deposit_amount)}
+                      </td>
+                    )}
+                    {visibleColumns.includes("notes") && (
+                      <td className="px-5 py-3 text-gray-500 max-w-xs truncate">
+                        {eq.notes || "-"}
+                      </td>
+                    )}
+                    {visibleColumns.includes("created_at") && (
+                      <td className="px-5 py-3 text-gray-500 text-xs">
+                        {eq.created_at}
+                      </td>
+                    )}
                     <td className="px-5 py-3">
                       {isAdmin && (
                         <button
@@ -237,7 +795,102 @@ export default function EquipmentPage() {
             </tbody>
           </table>
         </div>
+
+        <div className="px-5 py-3 border-t border-gray-100 flex items-center justify-between flex-wrap gap-2">
+          <div className="flex items-center gap-2 text-sm text-gray-600">
+            <span>每页显示</span>
+            <select
+              value={pageSize}
+              onChange={(e) => {
+                setPageSize(Number(e.target.value));
+                setCurrentPage(1);
+                setActiveViewId(null);
+              }}
+              className="px-2 py-1 border border-gray-300 rounded text-sm bg-white"
+            >
+              <option value={10}>10</option>
+              <option value={20}>20</option>
+              <option value={50}>50</option>
+              <option value={100}>100</option>
+            </select>
+            <span>条</span>
+          </div>
+
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+              disabled={currentPage <= 1}
+              className="p-1.5 border border-gray-300 rounded text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <ChevronLeft className="w-4 h-4" />
+            </button>
+            <span className="px-3 py-1 text-sm text-gray-600">
+              第 {currentPage} / {totalPages} 页
+            </span>
+            <button
+              onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+              disabled={currentPage >= totalPages}
+              className="p-1.5 border border-gray-300 rounded text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <ChevronRight className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
       </div>
+
+      {showSaveDialog && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-sm">
+            <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
+              <h3 className="font-semibold text-gray-900">保存视图方案</h3>
+              <button
+                onClick={() => setShowSaveDialog(false)}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-5 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  方案名称
+                </label>
+                <input
+                  type="text"
+                  value={saveViewName}
+                  onChange={(e) => setSaveViewName(e.target.value)}
+                  placeholder="例如：仅看可用轮椅"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-teal-700/30 focus:border-teal-700"
+                  autoFocus
+                />
+              </div>
+              <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={saveAsDefault}
+                  onChange={(e) => setSaveAsDefault(e.target.checked)}
+                  className="rounded border-gray-300 text-teal-700 focus:ring-teal-700"
+                />
+                设为默认方案（下次进入自动应用）
+              </label>
+            </div>
+            <div className="px-5 py-3 border-t border-gray-100 flex justify-end gap-2">
+              <button
+                onClick={() => setShowSaveDialog(false)}
+                className="px-4 py-2 text-sm text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200"
+              >
+                取消
+              </button>
+              <button
+                onClick={handleSaveView}
+                className="px-4 py-2 text-sm text-white bg-teal-700 rounded-lg hover:bg-teal-800"
+              >
+                保存
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showModal && (
         <EquipmentModal

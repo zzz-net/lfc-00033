@@ -23,16 +23,19 @@ function sendCsv(res: Response, filename: string, header: string, rows: string[]
 }
 
 router.get('/equipments', authMiddleware, adminMiddleware, (req: Request, res: Response): void => {
-  const { status, name, type } = req.query
-  let sql = 'SELECT * FROM equipments WHERE 1=1'
+  const { status, name, type, sort_by, sort_order } = req.query
+  let whereSql = ' WHERE 1=1'
   const params: unknown[] = []
 
-  if (status) { sql += ' AND status = ?'; params.push(status) }
-  if (name) { sql += ' AND name LIKE ?'; params.push(`%${name}%`) }
-  if (type) { sql += ' AND type = ?'; params.push(type) }
+  if (status) { whereSql += ' AND status = ?'; params.push(status) }
+  if (name) { whereSql += ' AND name LIKE ?'; params.push(`%${name}%`) }
+  if (type) { whereSql += ' AND type = ?'; params.push(type) }
 
-  sql += ' ORDER BY created_at DESC'
+  const validSortColumns = ['id', 'name', 'type', 'status', 'deposit_amount', 'created_at', 'updated_at']
+  const sortBy = validSortColumns.includes(String(sort_by)) ? String(sort_by) : 'created_at'
+  const sortOrder = sort_order === 'asc' ? 'ASC' : 'DESC'
 
+  const sql = 'SELECT * FROM equipments' + whereSql + ` ORDER BY ${sortBy} ${sortOrder}`
   const rows = db.prepare(sql).all(...params) as Record<string, unknown>[]
   const header = toCsvRow(['ID', '名称', '类型', '状态', '押金金额', '备注', '创建时间', '更新时间'])
   const statusMap: Record<string, string> = { available: '可用', borrowed: '借出', damaged: '损坏', pending_confirm: '待确认' }

@@ -77,6 +77,33 @@ db.exec(`
     detail TEXT DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
   );
+
+  CREATE TABLE IF NOT EXISTS saved_views (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    page TEXT NOT NULL DEFAULT 'equipments',
+    name TEXT NOT NULL,
+    filters TEXT NOT NULL,
+    sort_by TEXT,
+    sort_order TEXT CHECK(sort_order IN ('asc', 'desc')),
+    page_size INTEGER DEFAULT 20,
+    visible_columns TEXT,
+    is_default INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    UNIQUE(user_id, page, name)
+  );
+
+  CREATE TABLE IF NOT EXISTS view_operation_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    view_id INTEGER REFERENCES saved_views(id),
+    view_name TEXT NOT NULL,
+    action TEXT NOT NULL CHECK(action IN ('create', 'update', 'delete', 'apply')),
+    operator_id INTEGER NOT NULL REFERENCES users(id),
+    operator_name TEXT NOT NULL,
+    detail TEXT DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+  );
 `)
 
 const userCount = db.prepare('SELECT COUNT(*) as count FROM users').get() as { count: number }

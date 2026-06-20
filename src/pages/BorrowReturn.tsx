@@ -40,8 +40,8 @@ export default function BorrowReturnPage() {
 
   const fetchAvailable = useCallback(async () => {
     try {
-      const data = await api.getEquipments({ status: "available" });
-      setAvailableEquipments(data);
+      const res = await api.getEquipments({ status: "available" });
+      setAvailableEquipments(res.data);
     } catch (err: unknown) {
       toast(err instanceof Error ? err.message : "加载失败", "error");
     }

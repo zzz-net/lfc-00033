@@ -454,6 +454,249 @@ async function main() {
     assert(borrowList.data.length === borrowCsvCount, `借还 damaged 筛选：列表 ${borrowList.data.length} = CSV ${borrowCsvCount} 行`);
   });
 
+  // ============= 测试 11：视图方案 - 创建、同名冲突、刷新恢复（持久化） =============
+  await test("11. 视图方案 CRUD + 同名冲突拦截 + 刷新恢复（持久化）", async () => {
+    const viewName = `回归测试-常用筛选-${Date.now()}`;
+    const viewPayload = {
+      page: "equipments",
+      name: viewName,
+      filters: { status: "available", type: "轮椅" },
+      sort_by: "name",
+      sort_order: "asc",
+      page_size: 50,
+      visible_columns: ["name", "type", "status"],
+      is_default: false,
+    };
+
+    // 11.1 创建方案成功
+    const createRes = await req("/api/views", "POST", viewPayload, adminToken);
+    assert(createRes.data && createRes.data.id > 0, "创建视图方案返回有效 ID");
+    assert(createRes.data.name === viewName, "创建后方案名称正确");
+    assert(createRes.data.filters.status === "available", "创建后筛选条件正确保存");
+    assert(createRes.data.sort_by === "name", "创建后排序字段正确保存");
+    assert(createRes.data.page_size === 50, "创建后分页大小正确保存");
+    const newViewId = createRes.data.id;
+
+    // 11.2 同名方案拦截（409 Conflict）
+    try {
+      await req("/api/views", "POST", { ...viewPayload, filters: {} }, adminToken);
+      assert(false, "同名方案创建应该报错");
+    } catch (e) {
+      assert(e.status === 409, "同名方案返回 409 状态码");
+      assert(e.body.error && e.body.error.includes("已存在同名方案"), "同名方案错误提示包含「已存在同名方案」");
+    }
+
+    // 11.3 刷新恢复 - 再次调用列表 API，方案仍然存在（模拟刷新/重启后读取）
+    const listAfterCreate = await req("/api/views?page=equipments", "GET", null, adminToken);
+    const found = listAfterCreate.data.find(v => v.id === newViewId);
+    assert(found, "刷新后方案仍存在（持久化验证）");
+    assert(found.filters.type === "轮椅", "刷新后筛选条件仍正确");
+
+    // 11.4 更新方案
+    const updateRes = await req(`/api/views/${newViewId}`, "PUT", {
+      filters: { status: "borrowed" },
+      page_size: 100,
+    }, adminToken);
+    assert(updateRes.data.filters.status === "borrowed", "更新后筛选条件变更生效");
+    assert(updateRes.data.page_size === 100, "更新后分页大小变更生效");
+
+    // 11.5 再次刷新，验证更新持久化
+    const listAfterUpdate = await req("/api/views?page=equipments", "GET", null, adminToken);
+    const foundUpdated = listAfterUpdate.data.find(v => v.id === newViewId);
+    assert(foundUpdated && foundUpdated.filters.status === "borrowed", "更新后刷新数据仍然生效（重启恢复验证）");
+
+    // 11.6 删除方案
+    const deleteRes = await req(`/api/views/${newViewId}`, "DELETE", null, adminToken);
+    assert(deleteRes.success === true, "删除方案返回成功");
+
+    // 11.7 删除后刷新，确认消失（删除回退验证）
+    const listAfterDelete = await req("/api/views?page=equipments", "GET", null, adminToken);
+    const notFound = listAfterDelete.data.find(v => v.id === newViewId);
+    assert(!notFound, "删除后方案列表中不再存在（删除回退验证）");
+  });
+
+  // ============= 测试 12：视图方案 - 权限限制（只能修改/删除自己的） =============
+  await test("12. 视图方案权限限制（他人方案只读，不能覆盖或删除）", async () => {
+    const adminViewName = `回归测试-管理员专属-${Date.now()}`;
+
+    // 12.1 admin 创建一个方案
+    const adminCreate = await req("/api/views", "POST", {
+      page: "equipments",
+      name: adminViewName,
+      filters: { status: "damaged" },
+    }, adminToken);
+    const adminViewId = adminCreate.data.id;
+
+    // 12.2 前台用户能看到列表（获取所有自己的，看不到 admin 的）
+    const frontList = await req("/api/views?page=equipments", "GET", null, frontToken);
+    const hasAdminView = frontList.data.some(v => v.id === adminViewId);
+    assert(!hasAdminView, "前台用户列表中看不到管理员创建的方案（数据隔离）");
+
+    // 12.3 前台用户尝试修改 admin 的方案 -> 403
+    try {
+      await req(`/api/views/${adminViewId}`, "PUT", { filters: {} }, frontToken);
+      assert(false, "前台修改管理员方案应该报错");
+    } catch (e) {
+      assert(e.status === 403, "前台修改他人方案返回 403");
+      assert(e.body.error && e.body.error.includes("只能修改自己"), "错误提示包含「只能修改自己」");
+    }
+
+    // 12.4 前台用户尝试删除 admin 的方案 -> 403
+    try {
+      await req(`/api/views/${adminViewId}`, "DELETE", null, frontToken);
+      assert(false, "前台删除管理员方案应该报错");
+    } catch (e) {
+      assert(e.status === 403, "前台删除他人方案返回 403");
+      assert(e.body.error && e.body.error.includes("只能删除自己"), "错误提示包含「只能删除自己」");
+    }
+
+    // 12.5 管理员自己删除清理数据
+    await req(`/api/views/${adminViewId}`, "DELETE", null, adminToken);
+    assert(true, "管理员可正常删除自己的方案");
+  });
+
+  // ============= 测试 13：方案切换后 - 列表结果、统计数量、导出 CSV 完全一致 =============
+  await test("13. 视图方案切换后：列表、统计数量、导出 CSV 完全一致", async () => {
+    const viewName = `回归测试-导出一致性-${Date.now()}`;
+    const viewPayload = {
+      page: "equipments",
+      name: viewName,
+      filters: { status: "available" },
+      sort_by: "deposit_amount",
+      sort_order: "desc",
+      page_size: 20,
+    };
+
+    // 13.1 创建一个带排序的方案
+    const createRes = await req("/api/views", "POST", viewPayload, adminToken);
+    const viewId = createRes.data.id;
+
+    // 13.2 应用方案
+    const applyRes = await req(`/api/views/${viewId}/apply`, "POST", {}, adminToken);
+    assert(applyRes.data.filters.status === "available", "应用方案返回正确筛选条件");
+    assert(applyRes.data.sort_by === "deposit_amount", "应用方案返回正确排序字段");
+
+    // 13.3 使用方案中的筛选+排序参数调列表 API
+    const listWithView = await req(
+      "/api/equipments?status=available&sort_by=deposit_amount&sort_order=desc",
+      "GET", null, adminToken
+    );
+    assert(listWithView.total !== undefined, "列表 API 返回统计总数 total");
+
+    // 13.4 使用相同参数调导出 API
+    const csvWithView = await req(
+      "/api/export/equipments?status=available&sort_by=deposit_amount&sort_order=desc",
+      "GET", null, adminToken
+    );
+    const csvDataLines = csvWithView.trim().split("\n").slice(1).filter(l => l.trim());
+    assert(
+      listWithView.total === csvDataLines.length,
+      `方案筛选下：列表 API 统计总数 ${listWithView.total} = CSV 数据行数 ${csvDataLines.length}`
+    );
+
+    // 13.5 验证排序一致性：CSV 第一行押金金额应该 >= 第二行（按押金降序）
+    if (csvDataLines.length >= 2) {
+      const parseCsvLine = (line) => {
+        const result = [];
+        let cur = "";
+        let inQuotes = false;
+        for (let i = 0; i < line.length; i++) {
+          const ch = line[i];
+          if (ch === '"') { inQuotes = !inQuotes; }
+          else if (ch === ',' && !inQuotes) { result.push(cur); cur = ""; }
+          else { cur += ch; }
+        }
+        result.push(cur);
+        return result;
+      };
+      const firstRow = parseCsvLine(csvDataLines[0]);
+      const secondRow = parseCsvLine(csvDataLines[1]);
+      const firstDeposit = parseFloat(firstRow[4]);
+      const secondDeposit = parseFloat(secondRow[4]);
+      assert(
+        firstDeposit >= secondDeposit,
+        `按押金降序导出：第一行押金 ${firstDeposit} >= 第二行押金 ${secondDeposit}`
+      );
+    }
+
+    // 13.6 清理
+    await req(`/api/views/${viewId}`, "DELETE", null, adminToken);
+  });
+
+  // ============= 测试 14：排序 + 分页功能 + 导出一致性 =============
+  await test("14. 排序分页功能：多维度排序 + 分页 + 排序参数下导出一致", async () => {
+    // 14.1 按名称升序
+    const sortNameAsc = await req("/api/equipments?sort_by=name&sort_order=asc", "GET", null, adminToken);
+    // 14.2 按名称降序
+    const sortNameDesc = await req("/api/equipments?sort_by=name&sort_order=desc", "GET", null, adminToken);
+    if (sortNameAsc.data.length >= 2 && sortNameDesc.data.length >= 2) {
+      assert(
+        sortNameAsc.data[0].name <= sortNameAsc.data[1].name,
+        "名称升序：第 1 条名称 <= 第 2 条名称"
+      );
+      assert(
+        sortNameDesc.data[0].name >= sortNameDesc.data[1].name,
+        "名称降序：第 1 条名称 >= 第 2 条名称"
+      );
+    }
+
+    // 14.3 分页：第 1 页 page_size=2
+    const page1 = await req("/api/equipments?sort_by=id&sort_order=asc&page=1&page_size=2", "GET", null, adminToken);
+    assert(page1.data.length <= 2, "分页 page_size=2：每页不超过 2 条");
+    assert(page1.page === 1, "分页响应 page=1 正确");
+    assert(page1.page_size === 2, "分页响应 page_size=2 正确");
+    assert(page1.total !== undefined, "分页响应包含 total 总数");
+
+    // 14.4 分页：第 2 页 page_size=2
+    const page2 = await req("/api/equipments?sort_by=id&sort_order=asc&page=2&page_size=2", "GET", null, adminToken);
+    if (page1.data.length === 2 && page2.data.length >= 1) {
+      assert(page1.data[1].id < page2.data[0].id, "分页数据不重叠：第 1 页末 ID < 第 2 页首 ID");
+    }
+
+    // 14.5 带排序参数的导出，CSV 数据条数 = 列表 total（分页列表 API 不影响导出全量）
+    const csvSorted = await req(
+      "/api/export/equipments?sort_by=name&sort_order=asc",
+      "GET", null, adminToken
+    );
+    const csvSortedLines = csvSorted.trim().split("\n").slice(1).filter(l => l.trim()).length;
+    const allList = await req("/api/equipments?sort_by=name&sort_order=asc", "GET", null, adminToken);
+    assert(
+      allList.total === csvSortedLines,
+      `排序参数下导出一致性：列表 total ${allList.total} = CSV 行数 ${csvSortedLines}`
+    );
+  });
+
+  // ============= 测试 15：视图方案操作日志记录 =============
+  await test("15. 视图方案 - 创建/更新/删除/应用操作日志记录", async () => {
+    const viewName = `回归测试-日志-${Date.now()}`;
+
+    // 15.1 创建
+    const createRes = await req("/api/views", "POST", {
+      page: "equipments",
+      name: viewName,
+      filters: { name: "轮椅" },
+    }, adminToken);
+    const viewId = createRes.data.id;
+
+    // 15.2 应用
+    await req(`/api/views/${viewId}/apply`, "POST", {}, adminToken);
+
+    // 15.3 更新
+    await req(`/api/views/${viewId}`, "PUT", { filters: { name: "雾化器" } }, adminToken);
+
+    // 15.4 删除
+    await req(`/api/views/${viewId}`, "DELETE", null, adminToken);
+
+    // 15.5 查询日志，验证 4 条操作都有记录
+    const logsRes = await req("/api/views/logs?limit=20", "GET", null, adminToken);
+    const viewLogs = logsRes.data.filter(l => l.view_name === viewName);
+    const actions = viewLogs.map(l => l.action).sort();
+    assert(actions.includes("create"), "操作日志包含 create");
+    assert(actions.includes("apply"), "操作日志包含 apply");
+    assert(actions.includes("update"), "操作日志包含 update");
+    assert(actions.includes("delete"), "操作日志包含 delete");
+  });
+
   // 总结
   console.log("\n" + "=".repeat(60));
   console.log(`回归测试结果：通过 ${passed} 项，失败 ${failed} 项`);
