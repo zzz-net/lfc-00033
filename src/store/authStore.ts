@@ -13,10 +13,14 @@ interface AuthState {
   fetchMe: () => Promise<void>;
 }
 
+const _initialToken = (() => {
+  try { return localStorage.getItem("token"); } catch { return null; }
+})();
+
 export const useAuthStore = create<AuthState>((set) => ({
   user: null,
-  token: null,
-  isAuthenticated: false,
+  token: _initialToken,
+  isAuthenticated: !!_initialToken,
   loading: false,
 
   login: async (username: string, password: string) => {

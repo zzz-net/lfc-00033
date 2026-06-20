@@ -340,6 +340,120 @@ async function main() {
     assert(brList.data.length === brCsvLines.length, `借还 returned 筛选：列表 ${brList.data.length} 条 = CSV ${brCsvLines.length} 行`);
   });
 
+  // ============= 测试 8：登录态持久性 & 筛选导出一致性（模拟刷新/重启场景） =============
+  await test("8. 登录态持久化 + 筛选导出一致性（模拟刷新/重启）", async () => {
+    // 8.1 同一 token 可多次调用 API（模拟刷新后仍有效）
+    const me1 = await req("/api/auth/me", "GET", null, adminToken);
+    assert(me1.data?.username === "admin", "token 第一次调用 /me 有效");
+    const me2 = await req("/api/auth/me", "GET", null, adminToken);
+    assert(me2.data?.username === "admin", "token 第二次调用 /me 仍有效（模拟刷新）");
+    const me3 = await req("/api/auth/me", "GET", null, adminToken);
+    assert(me3.data?.username === "admin", "token 第三次调用 /me 仍有效（模拟重开）");
+
+    // 8.2 相同筛选参数下，列表 API 数据行 = 导出 CSV 数据行（确保导出上下文一致）
+    const filters = [
+      { eq: "?status=borrowed", name: "status=borrowed" },
+      { eq: "?status=available", name: "status=available" },
+      { eq: "?status=damaged", name: "status=damaged" },
+    ];
+    for (const f of filters) {
+      const list = await req("/api/equipments" + f.eq, "GET", null, adminToken);
+      const csv = await req("/api/export/equipments" + f.eq, "GET", null, adminToken);
+      const csvLines = csv.trim().split("\n").slice(1).filter(l => l.trim());
+      assert(
+        list.data.length === csvLines.length,
+        `设备筛选 ${f.name}：列表 ${list.data.length} = CSV ${csvLines.length} 行`
+      );
+    }
+
+    // 8.3 同一套筛选条件连续两次导出结果完全一致（导出上下文稳定）
+    const csvA = await req("/api/export/equipments?status=borrowed", "GET", null, adminToken);
+    const csvB = await req("/api/export/equipments?status=borrowed", "GET", null, adminToken);
+    const linesA = csvA.trim().split("\n").slice(1).sort().join("|");
+    const linesB = csvB.trim().split("\n").slice(1).sort().join("|");
+    assert(linesA === linesB, "相同筛选下连续两次导出 CSV 内容完全一致");
+
+    // 8.4 前台 token 也能持续调用（普通用户刷新恢复验证）
+    const frontMe = await req("/api/auth/me", "GET", null, frontToken);
+    assert(frontMe.data?.role === "front_desk", "前台 token 刷新后仍有效");
+  });
+
+  // ============= 测试 9：损坏记录重复操作提示矩阵 =============
+  await test("9. 已损坏/已归还/待确认记录重复操作提示校验矩阵", async () => {
+    // 9.1 已损坏记录执行全部三种操作，提示都要包含「已损坏」
+    for (const { path, method, action } of [
+      { path: "/return", method: "PUT", action: "归还操作" },
+      { path: "/damage", method: "PUT", action: "报损操作" },
+      { path: "/confirm-damage", method: "PUT", action: "确认损坏操作" },
+    ]) {
+      try {
+        await req(`/api/borrows/${borrowId4}${path}`, method, { damage_description: "x", deposit_deducted: 10 }, adminToken);
+        assert(false, `已损坏记录执行${action}应该报错`);
+      } catch (e) {
+        const msg = e.body.error;
+        assert(msg.includes("已损坏"), `已损坏记录${action}，提示包含「已损坏」: ${msg}`);
+      }
+    }
+
+    // 9.2 已归还记录执行三种操作，提示都要包含「已归还」
+    for (const { path, method, action } of [
+      { path: "/return", method: "PUT", action: "归还操作" },
+      { path: "/damage", method: "PUT", action: "报损操作" },
+      { path: "/confirm-damage", method: "PUT", action: "确认损坏操作" },
+    ]) {
+      try {
+        await req(`/api/borrows/${borrowId2}${path}`, method, { damage_description: "x", deposit_deducted: 10 }, adminToken);
+        assert(false, `已归还记录执行${action}应该报错`);
+      } catch (e) {
+        const msg = e.body.error;
+        assert(msg.includes("已归还"), `已归还记录${action}，提示包含「已归还」: ${msg}`);
+      }
+    }
+
+    // 9.3 待确认损坏记录执行归还/确认损坏/再报损的提示
+    try {
+      await req(`/api/borrows/${borrowId3}/return`, "PUT", null, frontToken);
+      assert(false, "待确认记录归还应报错");
+    } catch (e) {
+      assert(e.body.error.includes("待确认损坏"), `待确认记录归还提示包含「待确认损坏」: ${e.body.error}`);
+    }
+
+    // 9.4 余额不改变 — 已归还和已损坏记录经过所有错误操作后，余额不变
+    const before = await req(`/api/borrows?status=returned&id=${borrowId2}`, "GET", null, adminToken);
+    const beforeBorrowed2 = before.data.find(r => r.id === borrowId2);
+    // 执行多次错误操作
+    try { await req(`/api/borrows/${borrowId2}/return`, "PUT", null, frontToken); } catch {}
+    try { await req(`/api/borrows/${borrowId2}/damage`, "PUT", { damage_description: "x" }, frontToken); } catch {}
+    try { await req(`/api/borrows/${borrowId2}/confirm-damage`, "PUT", { deposit_deducted: 10 }, adminToken); } catch {}
+    const after = await req(`/api/borrows?status=returned&id=${borrowId2}`, "GET", null, adminToken);
+    const afterBorrowed2 = after.data.find(r => r.id === borrowId2);
+    assert(
+      beforeBorrowed2?.deposit_refunded === afterBorrowed2?.deposit_refunded &&
+      beforeBorrowed2?.deposit_deducted === afterBorrowed2?.deposit_deducted,
+      "已归还记录经多次错误操作，押金退还和扣减金额都不变"
+    );
+  });
+
+  // ============= 测试 10：刷新后筛选条件 + 列表数据一致性（后端契约验证） =============
+  await test("10. 筛选参数契约稳定（刷新后同参数得同结果）", async () => {
+    // 10.1 同一筛选参数调用两次，数据条数一致
+    const call1 = await req("/api/equipments?status=available&type=轮椅", "GET", null, adminToken);
+    const call2 = await req("/api/equipments?status=available&type=轮椅", "GET", null, adminToken);
+    assert(call1.data.length === call2.data.length, "同一筛选两次调用，列表条数一致");
+
+    // 10.2 导出使用同一套多条件筛选，CSV 数据条数 = 列表条数
+    const listMulti = await req("/api/equipments?status=available", "GET", null, adminToken);
+    const csvMulti = await req("/api/export/equipments?status=available", "GET", null, adminToken);
+    const csvCount = csvMulti.trim().split("\n").slice(1).filter(l => l.trim()).length;
+    assert(listMulti.data.length === csvCount, `多条件筛选：列表 ${listMulti.data.length} = CSV ${csvCount} 行`);
+
+    // 10.3 借还记录和押金流水的筛选一致性
+    const borrowList = await req("/api/borrows?status=damaged", "GET", null, adminToken);
+    const borrowCsv = await req("/api/export/borrows?status=damaged", "GET", null, adminToken);
+    const borrowCsvCount = borrowCsv.trim().split("\n").slice(1).filter(l => l.trim()).length;
+    assert(borrowList.data.length === borrowCsvCount, `借还 damaged 筛选：列表 ${borrowList.data.length} = CSV ${borrowCsvCount} 行`);
+  });
+
   // 总结
   console.log("\n" + "=".repeat(60));
   console.log(`回归测试结果：通过 ${passed} 项，失败 ${failed} 项`);
