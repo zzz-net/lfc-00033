@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { X, Plus, User, Phone, Clock, StickyNote, Bell, CheckCircle2, XCircle, ArrowUp, ArrowDown } from "lucide-react";
+import { X, Plus, User, Phone, Clock, StickyNote, Bell, CheckCircle2, XCircle, ArrowUp, ArrowDown, Lock, Unlock } from "lucide-react";
 import type { EquipmentDetail, Reservation } from "@/types";
 import { formatAmount, formatDate, EQUIPMENT_STATUS_LABELS, EQUIPMENT_STATUS_COLORS, DEPOSIT_TYPE_LABELS, DEPOSIT_TYPE_COLORS, RESERVATION_STATUS_LABELS, RESERVATION_STATUS_COLORS } from "@/utils/helpers";
 import { api } from "@/utils/api";
@@ -28,10 +28,10 @@ export default function EquipmentDetailDrawer({ detail, loading, onClose, onRefr
   if (!detail && !loading) return null;
 
   const activeReservations = detail?.reservations.filter(
-    (r) => r.status === "queued" || r.status === "notified"
+    (r) => r.status === "queued" || r.status === "notified" || r.status === "locked"
   ) || [];
   const historyReservations = detail?.reservations.filter(
-    (r) => r.status === "completed" || r.status === "cancelled"
+    (r) => r.status === "completed" || r.status === "cancelled" || r.status === "expired"
   ) || [];
 
   const handleAddReservation = async () => {
@@ -105,6 +105,37 @@ export default function EquipmentDetailDrawer({ detail, loading, onClose, onRefr
       } else {
         toast(err instanceof Error ? err.message : "取消失败", "error");
       }
+    }
+  };
+
+  const handleLock = async (r: Reservation) => {
+    try {
+      await api.lockReservation(r.id);
+      toast("已锁定预约人为唯一取件对象", "success");
+      onRefresh?.();
+    } catch (err: any) {
+      if (err?.conflict) {
+        toast("锁定冲突，设备已锁定给其他预约人，请刷新", "error");
+      } else {
+        toast(err instanceof Error ? err.message : "锁定失败", "error");
+      }
+      onRefresh?.();
+    }
+  };
+
+  const handleReleaseLock = async (r: Reservation) => {
+    if (!confirm(`确认释放 ${r.borrower_name} 的取件锁定？释放后将自动锁定下一位预约人。`)) return;
+    try {
+      await api.releaseLockReservation(r.id, r.version);
+      toast("已释放取件锁定", "success");
+      onRefresh?.();
+    } catch (err: any) {
+      if (err?.conflict) {
+        toast("该预约已被其他操作更新，请刷新后重试", "error");
+      } else {
+        toast(err instanceof Error ? err.message : "释放失败", "error");
+      }
+      onRefresh?.();
     }
   };
 
@@ -284,12 +315,18 @@ export default function EquipmentDetailDrawer({ detail, loading, onClose, onRefr
                               <StickyNote className="w-3 h-3 inline mr-0.5" />{r.notes}
                             </div>
                           )}
+                          {r.status === "locked" && r.lock_expires_at && (
+                            <div className="text-xs text-purple-500 flex items-center gap-0.5">
+                              <Lock className="w-3 h-3" />
+                              取件锁定超时：{formatDate(r.lock_expires_at)}
+                            </div>
+                          )}
                           <div className="text-xs text-gray-400">
                             登记人：{r.operator_name} · {formatDate(r.created_at)}
                           </div>
                         </div>
                         <div className="flex flex-col gap-1">
-                          {isAdmin && (
+                          {isAdmin && activeReservations.length > 1 && (
                             <div className="flex gap-0.5">
                               <button
                                 onClick={() => handleMove(r, -1)}
@@ -319,7 +356,34 @@ export default function EquipmentDetailDrawer({ detail, loading, onClose, onRefr
                                 <Bell className="w-4 h-4" />
                               </button>
                             )}
-                            {(r.status === "queued" || r.status === "notified") && (isAdmin || r.operator_id === user?.id) && (
+                            {r.status === "queued" && isAdmin && (
+                              <button
+                                onClick={() => handleLock(r)}
+                                className="p-1 text-purple-600 hover:text-purple-800"
+                                title="锁定为取件人"
+                              >
+                                <Lock className="w-4 h-4" />
+                              </button>
+                            )}
+                            {r.status === "notified" && isAdmin && (
+                              <button
+                                onClick={() => handleLock(r)}
+                                className="p-1 text-purple-600 hover:text-purple-800"
+                                title="升级为取件锁定"
+                              >
+                                <Lock className="w-4 h-4" />
+                              </button>
+                            )}
+                            {r.status === "locked" && isAdmin && (
+                              <button
+                                onClick={() => handleReleaseLock(r)}
+                                className="p-1 text-orange-500 hover:text-orange-700"
+                                title="释放锁定"
+                              >
+                                <Unlock className="w-4 h-4" />
+                              </button>
+                            )}
+                            {(r.status === "queued" || r.status === "notified" || r.status === "locked") && (isAdmin || r.operator_id === user?.id) && (
                               <>
                                 <button
                                   onClick={() => handleComplete(r)}

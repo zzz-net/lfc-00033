@@ -683,5 +683,143 @@ router.put('/reorder', authMiddleware, adminMiddleware, (req: Request, res: Resp
   res.json({ success: true, data: result })
 })
 
+function recoverReservationLocksOnStartup(): {
+  expired_count: number; relocked_count: number; fixed_orphan_equipment: number } {
+  const now = new Date()
+  let expiredCount = 0
+  let relockedCount = 0
+  let fixedOrphanEquipment = 0
+
+  const allLocked = db.prepare(
+    "SELECT * FROM reservations WHERE status = 'locked'"
+  ).all() as { id: number; equipment_id: number; lock_expires_at: string | null; borrower_name: string }[]
+
+  for (const locked of allLocked) {
+    if (locked.lock_expires_at) {
+      const expiresAt = new Date(locked.lock_expires_at + 'Z')
+      if (now > expiresAt) {
+        resolveExpiredLocks(locked.equipment_id)
+        expiredCount++
+      }
+    }
+  }
+
+  const reservedEquipments = db.prepare(
+    "SELECT id, locked_reservation_id FROM equipments WHERE status = 'reserved'"
+  ).all() as { id: number; locked_reservation_id: number | null }[]
+
+  for (const equip of reservedEquipments) {
+    const equipName = (db.prepare('SELECT name FROM equipments WHERE id = ?').get(equip.id) as { name: string }).name
+    if (equip.locked_reservation_id) {
+      const resv = db.prepare(
+        "SELECT status, lock_expires_at FROM reservations WHERE id = ?"
+      ).get(equip.locked_reservation_id) as { status: string; lock_expires_at: string | null } | undefined
+      if (!resv) {
+        db.prepare(
+          "UPDATE equipments SET locked_reservation_id = NULL, updated_at = datetime('now', 'localtime') WHERE id = ?"
+        ).run(equip.id)
+        const activeResvs = db.prepare(
+          "SELECT COUNT(*) as cnt FROM reservations WHERE equipment_id = ? AND status IN ('queued', 'notified', 'locked')"
+        ).get(equip.id) as { cnt: number }
+        if (activeResvs.cnt === 0) {
+          db.prepare(
+            "UPDATE equipments SET status = 'available', updated_at = datetime('now', 'localtime') WHERE id = ?"
+          ).run(equip.id)
+        } else {
+          autoLockNextIfNeeded(equip.id, 1, 'system', equipName)
+          relockedCount++
+        }
+        fixedOrphanEquipment++
+      } else if (resv.status !== 'locked') {
+        db.prepare(
+          "UPDATE equipments SET locked_reservation_id = NULL, updated_at = datetime('now', 'localtime') WHERE id = ?"
+        ).run(equip.id)
+        if (resv.status === 'queued' || resv.status === 'notified') {
+          autoLockNextIfNeeded(equip.id, 1, 'system', equipName)
+          relockedCount++
+        } else {
+          const activeCount = db.prepare(
+            "SELECT COUNT(*) as cnt FROM reservations WHERE equipment_id = ? AND status IN ('queued', 'notified', 'locked')"
+          ).get(equip.id) as { cnt: number }
+          if (activeCount.cnt === 0) {
+            db.prepare(
+              "UPDATE equipments SET status = 'available', updated_at = datetime('now', 'localtime') WHERE id = ?"
+            ).run(equip.id)
+          }
+        }
+        fixedOrphanEquipment++
+      }
+    }
+  }
+
+  const noLockedEquip = db.prepare(
+    `SELECT e.id FROM equipments e
+     WHERE e.status = 'reserved' AND e.locked_reservation_id IS NULL
+     AND EXISTS (SELECT 1 FROM reservations r WHERE r.equipment_id = e.id AND r.status IN ('queued', 'notified', 'locked'))`
+  ).all() as { id: number }[]
+
+  for (const equip of noLockedEquip) {
+    const equipName = (db.prepare('SELECT name FROM equipments WHERE id = ?').get(equip.id) as { name: string }).name
+    autoLockNextIfNeeded(equip.id, 1, 'system', equipName)
+    relockedCount++
+  }
+
+  db.prepare(
+    `INSERT INTO operation_logs (equipment_id, action, operator_id, operator_name, detail)
+    VALUES (NULL, 'system_recovery', 1, 'system', ?)`
+  ).run(
+    `预约锁定台启动恢复：释放过期锁定 ${expiredCount} 项，重建锁定 ${relockedCount} 项，修复孤立设备 ${fixedOrphanEquipment} 项`
+  )
+
+  return {
+    expired_count: expiredCount,
+    relocked_count: relockedCount,
+    fixed_orphan_equipment: fixedOrphanEquipment,
+  }
+}
+
+function runPeriodicLockCleanup(): number {
+  const candidates = db.prepare(
+    "SELECT DISTINCT equipment_id FROM reservations WHERE status = 'locked' AND lock_expires_at IS NOT NULL"
+  ).all() as { equipment_id: number }[]
+
+  let cleaned = 0
+  for (const { equipment_id } of candidates) {
+    const before = db.prepare("SELECT status FROM reservations WHERE equipment_id = ? AND status = 'locked'").get(equipment_id)
+    resolveExpiredLocks(equipment_id)
+    const after = db.prepare("SELECT status FROM reservations WHERE equipment_id = ? AND status = 'locked'").get(equipment_id)
+    if (!after && before) {
+      cleaned++
+    }
+  }
+  return cleaned
+}
+
+let cleanupTimer: NodeJS.Timeout | null = null
+
+function startPeriodicLockCleanup(intervalMs: number = 60 * 1000): void {
+  if (cleanupTimer) {
+    clearInterval(cleanupTimer)
+  }
+  cleanupTimer = setInterval(() => {
+    try {
+      runPeriodicLockCleanup()
+    } catch (e) {
+      console.error('[Periodic Cleanup] 定时清理超时锁定出错:', e)
+    }
+  }, intervalMs)
+  console.log(`[Periodic Cleanup] 已启动预约锁定超时定时清理任务，间隔 ${intervalMs / 1000} 秒`)
+}
+
+function stopPeriodicLockCleanup(): void {
+  if (cleanupTimer) {
+    clearInterval(cleanupTimer)
+    cleanupTimer = null
+    console.log('[Periodic Cleanup] 已停止定时清理任务')
+  }
+}
+
 export default router
-export { resolveExpiredLocks, autoLockNextIfNeeded, PICKUP_LOCK_TIMEOUT_MINUTES }
+export {
+  resolveExpiredLocks, autoLockNextIfNeeded, PICKUP_LOCK_TIMEOUT_MINUTES, recoverReservationLocksOnStartup, runPeriodicLockCleanup, startPeriodicLockCleanup, stopPeriodicLockCleanup
+}

@@ -176,11 +176,24 @@ export default function BorrowReturnPage() {
       setBorrowForm({ equipment_id: 0, borrower_name: "", borrower_phone: "" });
       refreshAll();
     } catch (err: any) {
-      if (err?.conflict) {
-        toast("设备状态在提交时已变更，请刷新后重试", "error");
+      if (err?.conflict?.type === 'pickup_lock_mismatch') {
+        const locked = err.conflict;
+        toast(
+          `身份不匹配：该设备已锁定给 ${locked.locked_borrower_name || '他人'}(${locked.locked_borrower_phone || '未知号码'})，仅限该预约人本人取件`,
+          "error"
+        );
+        refreshAll();
+      } else if (err?.conflict?.type === 'pickup_lock_changed') {
+        toast('取件锁定状态在提交时已变更，请刷新后重试', 'error');
+        refreshAll();
+      } else if (err?.conflict?.type === 'equipment_status_changed') {
+        toast('设备状态在提交时已变更，请刷新后重试', 'error');
+        refreshAll();
+      } else if (err?.conflict) {
+        toast('提交时检测到并发冲突，请刷新后重试', 'error');
         refreshAll();
       } else {
-        toast(err instanceof Error ? err.message : "借出失败", "error");
+        toast(err instanceof Error ? err.message : '借出失败', 'error');
       }
     } finally {
       setSubmitting(false);

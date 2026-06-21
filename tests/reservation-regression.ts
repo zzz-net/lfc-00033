@@ -393,9 +393,10 @@ async function testExportConsistency() {
     const resvCsvText = await resvCsvRes.text()
     const resvCsvLines = resvCsvText.split('\n')
     const resvHeader = resvCsvLines[0]
-    const resvRow = resvCsvLines.find((line: string) => line.includes('导出锁定预约-唯一'))
-    assert(!!resvRow, '预约 CSV 包含测试预约')
-    assert(resvRow!.includes('已锁定'), '预约 CSV 状态显示「已锁定」')
+    const resvMatchingRows = resvCsvLines.filter((line: string) => line.includes('导出锁定预约-唯一'))
+    assert(resvMatchingRows.length >= 1, '预约 CSV 包含测试预约')
+    const resvRow = resvMatchingRows[resvMatchingRows.length - 1]
+    assert(resvRow.includes('已锁定'), '预约 CSV 状态显示「已锁定」')
     assert(resvHeader.includes('锁定时间'), '预约 CSV 表头包含锁定时间列')
     assert(resvHeader.includes('锁定超时时间'), '预约 CSV 表头包含锁定超时时间列')
   } finally {
