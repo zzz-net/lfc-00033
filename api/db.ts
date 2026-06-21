@@ -308,6 +308,33 @@ if (needMigrateLogs) {
   tx()
 }
 
+db.exec(`
+  CREATE TABLE IF NOT EXISTS offline_signoff_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    type TEXT NOT NULL CHECK(type IN ('borrow', 'return', 'damage')),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'syncing', 'failed', 'completed')),
+    equipment_id INTEGER NOT NULL,
+    equipment_snapshot TEXT,
+    borrower_name TEXT NOT NULL,
+    borrower_phone TEXT NOT NULL,
+    damage_description TEXT DEFAULT '',
+    signer_name TEXT DEFAULT '',
+    notes TEXT DEFAULT '',
+    error_message TEXT DEFAULT '',
+    conflict_info TEXT,
+    server_record_id INTEGER,
+    operator_id INTEGER NOT NULL REFERENCES users(id),
+    operator_name TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    synced_at TEXT,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_offline_signoff_status ON offline_signoff_records(status);
+  CREATE INDEX IF NOT EXISTS idx_offline_signoff_equipment ON offline_signoff_records(equipment_id);
+  CREATE INDEX IF NOT EXISTS idx_offline_signoff_operator ON offline_signoff_records(operator_id);
+`)
+
 const equipStatusCheck = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='equipments'").get() as { sql: string } | undefined
 if (equipStatusCheck && !equipStatusCheck.sql.includes("'reserved'")) {
   const tx = db.transaction(() => {

@@ -7,6 +7,7 @@ import Login from "@/pages/Login";
 import EquipmentPage from "@/pages/Equipment";
 import BorrowReturnPage from "@/pages/BorrowReturn";
 import DepositLogPage from "@/pages/DepositLog";
+import OfflineSignoffPage from "@/pages/OfflineSignoff";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, fetchMe, user } = useAuthStore();
@@ -39,6 +40,7 @@ function AppRoutes() {
         <Route path="/" element={<EquipmentPage />} />
         <Route path="/borrow-return" element={<BorrowReturnPage />} />
         <Route path="/deposit-log" element={<DepositLogPage />} />
+        <Route path="/offline-signoff" element={<OfflineSignoffPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

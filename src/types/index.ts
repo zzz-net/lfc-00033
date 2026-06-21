@@ -183,3 +183,54 @@ export interface PaginatedEquipments {
   page: number;
   page_size: number;
 }
+
+export type OfflineSignoffType = "borrow" | "return" | "damage";
+export type OfflineSignoffStatus = "pending" | "syncing" | "failed" | "completed";
+
+export interface OfflineSignoffConflictInfo {
+  type: string;
+  snapshot_status?: string;
+  current_status?: string;
+  equipment_name?: string;
+  equipment_id?: number;
+  locked_reservation_id?: number;
+  locked_borrower_name?: string;
+  locked_borrower_phone?: string;
+}
+
+export interface OfflineSignoffRecord {
+  id: number;
+  type: OfflineSignoffType;
+  status: OfflineSignoffStatus;
+  equipment_id: number;
+  equipment_snapshot: Equipment | null;
+  borrower_name: string;
+  borrower_phone: string;
+  damage_description: string;
+  signer_name: string;
+  notes: string;
+  error_message: string;
+  conflict_info: OfflineSignoffConflictInfo | null;
+  server_record_id: number | null;
+  operator_id: number;
+  operator_name: string;
+  created_at: string;
+  synced_at: string | null;
+  updated_at: string;
+}
+
+export interface OfflineSignoffStats {
+  pending: number;
+  syncing: number;
+  failed: number;
+  completed: number;
+  total: number;
+}
+
+export interface OfflineSignoffExportData {
+  version: number;
+  exported_at: string;
+  exported_by: { id: number; username: string };
+  count: number;
+  records: OfflineSignoffRecord[];
+}

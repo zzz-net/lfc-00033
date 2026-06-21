@@ -54,3 +54,29 @@ export const RESERVATION_STATUS_COLORS: Record<string, string> = {
   cancelled: "bg-gray-100 text-gray-600",
   expired: "bg-red-100 text-red-700",
 };
+
+export const OFFLINE_SIGNOFF_TYPE_LABELS: Record<string, string> = {
+  borrow: "借出",
+  return: "归还",
+  damage: "损坏登记",
+};
+
+export const OFFLINE_SIGNOFF_TYPE_COLORS: Record<string, string> = {
+  borrow: "bg-teal-100 text-teal-800",
+  return: "bg-blue-100 text-blue-800",
+  damage: "bg-orange-100 text-orange-800",
+};
+
+export const OFFLINE_SIGNOFF_STATUS_LABELS: Record<string, string> = {
+  pending: "待同步",
+  syncing: "同步中",
+  failed: "同步失败",
+  completed: "已完成",
+};
+
+export const OFFLINE_SIGNOFF_STATUS_COLORS: Record<string, string> = {
+  pending: "bg-amber-100 text-amber-800",
+  syncing: "bg-blue-100 text-blue-800",
+  failed: "bg-red-100 text-red-800",
+  completed: "bg-green-100 text-green-800",
+};

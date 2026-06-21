@@ -18,6 +18,7 @@ import depositRoutes from './routes/deposits.js'
 import exportRoutes from './routes/export.js'
 import viewRoutes from './routes/views.js'
 import reservationRoutes from './routes/reservations.js'
+import offlineSignoffRoutes from './routes/offline-signoffs.js'
 import './db.js'
 
 // for esm mode
@@ -43,6 +44,7 @@ app.use('/api/deposits', depositRoutes)
 app.use('/api/export', exportRoutes)
 app.use('/api/views', viewRoutes)
 app.use('/api/reservations', reservationRoutes)
+app.use('/api/offline-signoffs', offlineSignoffRoutes)
 
 /**
  * health

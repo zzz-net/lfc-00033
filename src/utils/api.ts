@@ -10,6 +10,8 @@ import type {
   ViewOperationLog,
   PaginatedEquipments,
   Reservation,
+  OfflineSignoffRecord,
+  OfflineSignoffStats,
 } from "@/types";
 
 const BASE_URL = "/api";
@@ -359,4 +361,79 @@ export const api = {
     equipment_name?: string;
   }) =>
     downloadFile("/export/reservations", "预约排队.csv", params as Record<string, string>),
+
+  getOfflineSignoffs: (params?: {
+    status?: string;
+    type?: string;
+    equipment_id?: number;
+    operator_id?: number;
+  }) => {
+    const qs = new URLSearchParams();
+    if (params?.status) qs.set("status", params.status);
+    if (params?.type) qs.set("type", params.type);
+    if (params?.equipment_id) qs.set("equipment_id", String(params.equipment_id));
+    if (params?.operator_id) qs.set("operator_id", String(params.operator_id));
+    const query = qs.toString();
+    return request<OfflineSignoffRecord[]>(`/offline-signoffs${query ? `?${query}` : ""}`);
+  },
+
+  getOfflineSignoffStats: () =>
+    request<OfflineSignoffStats>("/offline-signoffs/stats"),
+
+  getOfflineSignoff: (id: number) =>
+    request<OfflineSignoffRecord>(`/offline-signoffs/${id}`),
+
+  createOfflineSignoff: (data: {
+    type: "borrow" | "return" | "damage";
+    equipment_id: number;
+    borrower_name: string;
+    borrower_phone: string;
+    damage_description?: string;
+    signer_name?: string;
+    notes?: string;
+  }) =>
+    request<OfflineSignoffRecord>("/offline-signoffs", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  syncOfflineSignoff: (id: number) =>
+    request<OfflineSignoffRecord>(`/offline-signoffs/${id}/sync`, {
+      method: "POST",
+    }),
+
+  batchSyncOfflineSignoffs: () =>
+    request<{
+      total: number;
+      success: number;
+      failed: number;
+      results: { id: number; status: "success" | "failed"; error?: string; conflict?: unknown }[];
+    }>("/offline-signoffs/batch-sync", {
+      method: "POST",
+    }),
+
+  resolveOfflineSignoff: (id: number, action: "retry" | "force" | "discard", force?: boolean) =>
+    request<OfflineSignoffRecord | { id: number; deleted: boolean }>(`/offline-signoffs/${id}/resolve`, {
+      method: "POST",
+      body: JSON.stringify({ action, force }),
+    }),
+
+  deleteOfflineSignoff: (id: number) =>
+    request<void>(`/offline-signoffs/${id}`, {
+      method: "DELETE",
+    }),
+
+  exportOfflineSignoffs: () =>
+    downloadFile("/offline-signoffs/export/json", "离线补录记录.json"),
+
+  importOfflineSignoffs: (records: unknown[]) =>
+    request<{
+      imported: number;
+      skipped: number;
+      total: number;
+      results: { original_id: number; new_id: number; status: string }[];
+    }>("/offline-signoffs/import/json", {
+      method: "POST",
+      body: JSON.stringify({ records }),
+    }),
 };

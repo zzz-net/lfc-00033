@@ -6,6 +6,7 @@ import {
   LogOut,
   Download,
   Stethoscope,
+  WifiOff,
 } from "lucide-react";
 import { useAuthStore } from "@/store/authStore";
 import { api } from "@/utils/api";
@@ -14,6 +15,7 @@ import { toast } from "@/components/Toast";
 const NAV_ITEMS = [
   { to: "/", label: "设备台账", icon: Package },
   { to: "/borrow-return", label: "借还操作", icon: ArrowLeftRight },
+  { to: "/offline-signoff", label: "离线补录台", icon: WifiOff },
   { to: "/deposit-log", label: "押金流水", icon: Wallet },
 ];
 
