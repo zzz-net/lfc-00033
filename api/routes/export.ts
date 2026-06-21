@@ -37,12 +37,19 @@ router.get('/equipments', authMiddleware, adminMiddleware, (req: Request, res: R
 
   const sql = 'SELECT * FROM equipments' + whereSql + ` ORDER BY ${sortBy} ${sortOrder}`
   const rows = db.prepare(sql).all(...params) as Record<string, unknown>[]
-  const header = toCsvRow(['ID', '名称', '类型', '状态', '押金金额', '备注', '创建时间', '更新时间'])
+  const header = toCsvRow(['ID', '名称', '类型', '状态', '押金金额', '备注', '锁定预约人', '创建时间', '更新时间'])
   const statusMap: Record<string, string> = { available: '可用', borrowed: '借出', reserved: '已预约', damaged: '损坏', pending_confirm: '待确认' }
-  const csvRows = rows.map(r => toCsvRow([
-    r.id, r.name, r.type, statusMap[String(r.status)] || r.status,
-    r.deposit_amount, r.notes, r.created_at, r.updated_at
-  ]))
+  const csvRows = rows.map(r => {
+    let lockedPerson = '-'
+    if (r.locked_reservation_id) {
+      const locked = db.prepare('SELECT borrower_name FROM reservations WHERE id = ?').get(r.locked_reservation_id) as { borrower_name: string } | undefined
+      lockedPerson = locked?.borrower_name || '-'
+    }
+    return toCsvRow([
+      r.id, r.name, r.type, statusMap[String(r.status)] || r.status,
+      r.deposit_amount, r.notes, lockedPerson, r.created_at, r.updated_at
+    ])
+  })
   sendCsv(res, 'equipments.csv', header, csvRows)
 })
 
@@ -108,14 +115,14 @@ router.get('/reservations', authMiddleware, adminMiddleware, (req: Request, res:
   sql += ' ORDER BY r.equipment_id ASC, r.queue_order ASC, r.created_at ASC'
 
   const rows = db.prepare(sql).all(...params) as Record<string, unknown>[]
-  const header = toCsvRow(['ID', '设备名称', '设备类型', '借用人', '联系电话', '预计取用时间', '排队顺位', '状态', '备注', '操作人', '创建时间', '通知时间', '完成时间', '取消时间', '取消原因'])
-  const statusMap: Record<string, string> = { queued: '排队中', notified: '已通知', completed: '已完成', cancelled: '已取消' }
+  const header = toCsvRow(['ID', '设备名称', '设备类型', '借用人', '联系电话', '预计取用时间', '排队顺位', '状态', '备注', '操作人', '创建时间', '通知时间', '锁定时间', '锁定超时时间', '超时时间', '完成时间', '取消时间', '取消原因'])
+  const statusMap: Record<string, string> = { queued: '排队中', notified: '已通知', locked: '已锁定', completed: '已完成', cancelled: '已取消', expired: '已超时' }
   const csvRows = rows.map(r => toCsvRow([
     r.id, r.equipment_name, r.equipment_type, r.borrower_name, r.borrower_phone,
     r.expected_pickup_time,
-    (r.status === 'queued' || r.status === 'notified') ? `#${Number(r.queue_order) + 1}` : '-',
+    (r.status === 'queued' || r.status === 'notified' || r.status === 'locked') ? `#${Number(r.queue_order) + 1}` : '-',
     statusMap[String(r.status)] || r.status,
-    r.notes, r.operator_name, r.created_at, r.notified_at, r.completed_at, r.cancelled_at, r.cancel_reason
+    r.notes, r.operator_name, r.created_at, r.notified_at, r.locked_at, r.lock_expires_at, r.expired_at, r.completed_at, r.cancelled_at, r.cancel_reason
   ]))
   sendCsv(res, 'reservations.csv', header, csvRows)
 })

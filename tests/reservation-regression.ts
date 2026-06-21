@@ -95,9 +95,13 @@ async function resetEquipment(token: string, equipmentId: number) {
     if (record) await returnEquipment(token, record.id)
   }
 
-  const reservations = detail.reservations || []
-  for (const r of reservations) {
-    if (r.status === 'queued' || r.status === 'notified') {
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const freshDetail = await getEquipmentDetail(token, equipmentId)
+    const activeResvs = (freshDetail.reservations || []).filter(
+      (r: any) => r.status === 'queued' || r.status === 'notified' || r.status === 'locked'
+    )
+    if (activeResvs.length === 0) break
+    for (const r of activeResvs) {
       await request('PUT', `/reservations/${r.id}/cancel`, {
         cancel_reason: '测试清理',
         expected_version: r.version,
@@ -111,188 +115,259 @@ async function resetEquipment(token: string, equipmentId: number) {
   }
 }
 
-async function testForbiddenCases() {
-  console.log('\n📋 测试组 1：禁止操作校验')
+async function testLockActivationOnReturn() {
+  console.log('\n📋 测试组 1：归还后自动锁定生效')
   const admin = await getAdminToken()
-  const equipId = await createTestEquipment(admin, '禁止测试设备')
+  const equipId = await createTestEquipment(admin, '锁定测试设备')
 
   try {
-    console.log('  → 对「可借」设备创建预约应被拒绝')
-    let res = await createReservation(admin, equipId, '张三', '13800000001')
-    assert(res.status === 400, '可借设备创建预约返回 400')
-    assert(res.data.error?.includes('已借出'), '错误信息提示仅已借出可预约')
+    await borrowEquipment(admin, equipId, '借用人A', '13800000001')
+    await createReservation(admin, equipId, '预约人B', '13800000002')
+    await createReservation(admin, equipId, '预约人C', '13800000003')
 
-    console.log('  → 借出设备后创建预约应成功')
-    await borrowEquipment(admin, equipId, '借用人A', '13800000010')
-    res = await createReservation(admin, equipId, '预约人B', '13800000002')
-    assert(res.status === 201, '已借出设备创建预约返回 201')
-
-    console.log('  → 归还后设备应变为「已预约」，再创建预约应被拒绝')
     const { data: borrowData } = await request('GET', '/borrows?status=borrowed', undefined, admin)
     const record = borrowData.data.find((r: any) => r.equipment_id === equipId)
     const returnRes = await returnEquipment(admin, record.id)
+
     const equipStatus = await getEquipmentStatus(admin, equipId)
     assert(equipStatus === 'reserved', '归还后设备状态为 reserved')
+
     assert(!!returnRes.next_reservation, '归还响应包含 next_reservation')
+    assert(returnRes.next_reservation?.status === 'locked', '下一位预约人状态为 locked')
+    assert(!!returnRes.next_reservation?.locked_at, '锁定时间已设置')
+    assert(!!returnRes.next_reservation?.lock_expires_at, '锁定超时时间已设置')
 
-    res = await createReservation(admin, equipId, '预约人C', '13800000003')
-    assert(res.status === 400, '已预约设备创建预约返回 400')
-    assert(res.data.error?.includes('已借出'), '错误信息提示仅已借出可预约')
+    const { data: resvData } = await request('GET', `/reservations?equipment_id=${equipId}`, undefined, admin)
+    const locked = resvData.data.find((r: any) => r.status === 'locked')
+    const queued = resvData.data.find((r: any) => r.status === 'queued')
+    assert(!!locked, '存在一条 locked 状态的预约')
+    assert(locked.borrower_name === '预约人B', '锁定的是第一位预约人')
+    assert(!!queued, '第二位仍为 queued')
+    assert(queued.borrower_name === '预约人C', '排队中的是第二位预约人')
 
-    console.log('  → 非通知预约人不可借出已预约设备（前台）')
-    const frontDesk = await getFrontDeskToken()
-    res = await request('POST', '/borrows', {
-      equipment_id: equipId,
-      borrower_name: '无关人',
-      borrower_phone: '13800000099',
-    }, frontDesk)
-    assert(res.status === 403, '前台非通知预约人借出已预约设备返回 403')
+    const equipDetail = await getEquipmentDetail(admin, equipId)
+    assert(equipDetail.equipment.locked_reservation_id === locked.id, '设备 locked_reservation_id 指向锁定预约')
 
-    console.log('  → 管理员可为任何人借出已预约设备')
-    res = await request('POST', '/borrows', {
-      equipment_id: equipId,
-      borrower_name: '无关人',
-      borrower_phone: '13800000099',
-    }, admin)
-    assert(res.status === 201, '管理员可为任何人借出已预约设备')
-    const afterAdminBorrow = await getEquipmentStatus(admin, equipId)
-    assert(afterAdminBorrow === 'borrowed', '管理员借出后设备为 borrowed')
-
-    console.log('  → 归还后前台通知预约人可借出')
-    const { data: borrowData2 } = await request('GET', '/borrows?status=borrowed', undefined, admin)
-    const record2 = borrowData2.data.find((r: any) => r.equipment_id === equipId)
-    const returnRes2 = await returnEquipment(admin, record2.id)
-    const notifiedPerson2 = returnRes2.next_reservation
-    if (notifiedPerson2) {
-      res = await request('POST', '/borrows', {
-        equipment_id: equipId,
-        borrower_name: notifiedPerson2.borrower_name,
-        borrower_phone: notifiedPerson2.borrower_phone,
-      }, frontDesk)
-      assert(res.status === 201, '前台通知预约人可借出已预约设备返回 201')
-      const newStatus = await getEquipmentStatus(admin, equipId)
-      assert(newStatus === 'borrowed', '借出后设备变为 borrowed')
-    }
-
-    console.log('  → 前台不可重排预约顺序')
-    const { data: resvData } = await request('GET', '/reservations', undefined, admin)
-    if (resvData.data.length > 0) {
-      const firstResv = resvData.data[0]
-      res = await request('PUT', '/reservations/reorder', {
-        equipment_id: firstResv.equipment_id,
-        orders: [{ id: firstResv.id, queue_order: 0 }],
-      }, frontDesk)
-      assert(res.status === 403, '前台重排预约返回 403')
-    }
+    const logs = equipDetail.operation_logs
+    const hasAutoLockLog = logs.some((l: any) => l.action === 'reservation_auto_lock')
+    assert(hasAutoLockLog, '操作日志包含 reservation_auto_lock')
   } finally {
     await resetEquipment(admin, equipId)
   }
 }
 
-async function testConcurrencyConflict() {
-  console.log('\n📋 测试组 2：并发冲突校验')
+async function testUnauthorizedIntercept() {
+  console.log('\n📋 测试组 2：越权拦截校验')
   const admin = await getAdminToken()
-  const equipId = await createTestEquipment(admin, '并发测试设备')
+  const frontDesk = await getFrontDeskToken()
+  const equipId = await createTestEquipment(admin, '越权测试设备')
 
   try {
-    await borrowEquipment(admin, equipId, '并发借用人', '13800000020')
-
-    console.log('  → 两个窗口同时为同一已借出设备创建不同预约，均可成功')
-    const [res1, res2] = await Promise.all([
-      createReservation(admin, equipId, '并发A', '13800000021'),
-      createReservation(admin, equipId, '并发B', '13800000022'),
-    ])
-    const bothSucceeded = (res1.status === 201 ? 1 : 0) + (res2.status === 201 ? 1 : 0)
-    assert(bothSucceeded === 2, '同时创建不同人预约均可成功')
-
-    console.log('  → 同一人同一设备不可重复预约')
-    await createReservation(admin, equipId, '重复人', '13800000025')
-    const dupRes = await createReservation(admin, equipId, '重复人', '13800000025')
-    assert(dupRes.status === 409, '重复预约返回 409')
-
-    console.log('  → 归还和创建预约同时进行，预约应被拦截（设备不再为已借出）')
-    const { data: borrowData } = await request('GET', '/borrows?status=borrowed', undefined, admin)
-    const record = borrowData.data.find((r: any) => r.equipment_id === equipId)
-    if (record) {
-      const returnPromise = request('PUT', `/borrows/${record.id}/return`, {}, admin)
-      const reservePromise = createReservation(admin, equipId, '归还冲突人', '13800000030')
-      const [returnRes, reserveRes] = await Promise.all([returnPromise, reservePromise])
-      assert(returnRes.status === 200, `归还操作完成 (status=${returnRes.status})`)
-      const reserveBlocked = reserveRes.status === 400 || reserveRes.status === 409
-      assert(reserveBlocked, '归还同时创建预约被拦截（设备不再是已借出）')
-    }
-  } finally {
-    await resetEquipment(admin, equipId)
-  }
-}
-
-async function testPersistenceAcrossRestart() {
-  console.log('\n📋 测试组 3：跨重启持久化校验')
-  const admin = await getAdminToken()
-  const equipId = await createTestEquipment(admin, '持久化测试设备')
-
-  try {
-    await borrowEquipment(admin, equipId, '持久借用人', '13800000040')
-    await createReservation(admin, equipId, '排队人1', '13800000041')
-    await createReservation(admin, equipId, '排队人2', '13800000042')
-
-    const { data: resvBefore } = await request('GET', `/reservations?equipment_id=${equipId}`, undefined, admin)
-    const queuedBefore = resvBefore.data.filter((r: any) => r.status === 'queued')
-    assert(queuedBefore.length === 2, '重启前有 2 条排队预约')
+    await borrowEquipment(admin, equipId, '越权借用人', '13800000010')
+    await createReservation(admin, equipId, '越权预约人', '13800000011')
 
     const { data: borrowData } = await request('GET', '/borrows?status=borrowed', undefined, admin)
     const record = borrowData.data.find((r: any) => r.equipment_id === equipId)
     await returnEquipment(admin, record.id)
 
-    const statusAfterReturn = await getEquipmentStatus(admin, equipId)
-    assert(statusAfterReturn === 'reserved', '归还后设备为 reserved')
+    console.log('  → 前台非锁定预约人不可借出')
+    let res = await request('POST', '/borrows', {
+      equipment_id: equipId,
+      borrower_name: '无关人',
+      borrower_phone: '13800000099',
+    }, frontDesk)
+    assert(res.status === 403, '前台非锁定预约人借出返回 403')
+    assert(res.data.error?.includes('仅限该预约人取件'), '错误信息提示仅限锁定预约人取件')
+    assert(res.data.conflict?.type === 'pickup_lock_mismatch', '冲突类型为 pickup_lock_mismatch')
 
-    const { data: resvAfter } = await request('GET', `/reservations?equipment_id=${equipId}`, undefined, admin)
-    const notifiedAfter = resvAfter.data.filter((r: any) => r.status === 'notified')
-    const queuedAfter = resvAfter.data.filter((r: any) => r.status === 'queued')
-    assert(notifiedAfter.length === 1, '归还后自动通知 1 人')
-    assert(queuedAfter.length === 1, '归还后仍有 1 人排队')
+    console.log('  → 管理员也不可越权借出给队列外的人')
+    res = await request('POST', '/borrows', {
+      equipment_id: equipId,
+      borrower_name: '无关人',
+      borrower_phone: '13800000099',
+    }, admin)
+    assert(res.status === 403, '管理员越权借出也返回 403')
+    assert(res.data.error?.includes('管理员也不可越权'), '错误信息提示管理员也不可越权')
 
-    console.log('  → 重新查询验证状态持久化（模拟刷新页面）')
+    console.log('  → 锁定预约人可以正常借出')
+    const { data: resvData } = await request('GET', `/reservations?equipment_id=${equipId}`, undefined, admin)
+    const lockedResv = resvData.data.find((r: any) => r.status === 'locked')
+    res = await request('POST', '/borrows', {
+      equipment_id: equipId,
+      borrower_name: lockedResv.borrower_name,
+      borrower_phone: lockedResv.borrower_phone,
+    }, frontDesk)
+    assert(res.status === 201, '锁定预约人前台可借出')
+    const afterBorrow = await getEquipmentStatus(admin, equipId)
+    assert(afterBorrow === 'borrowed', '借出后设备为 borrowed')
+  } finally {
+    await resetEquipment(admin, equipId)
+  }
+}
+
+async function testCancelReleasesLockAndAutoLocksNext() {
+  console.log('\n📋 测试组 3：取消锁定后自动锁定下一位')
+  const admin = await getAdminToken()
+  const equipId = await createTestEquipment(admin, '取消释放测试设备')
+
+  try {
+    await borrowEquipment(admin, equipId, '取消借用人', '13800000020')
+    await createReservation(admin, equipId, '取消预约1', '13800000021')
+    await createReservation(admin, equipId, '取消预约2', '13800000022')
+
+    const { data: borrowData } = await request('GET', '/borrows?status=borrowed', undefined, admin)
+    const record = borrowData.data.find((r: any) => r.equipment_id === equipId)
+    await returnEquipment(admin, record.id)
+
+    const { data: resvData } = await request('GET', `/reservations?equipment_id=${equipId}`, undefined, admin)
+    const lockedResv = resvData.data.find((r: any) => r.status === 'locked')
+    assert(lockedResv.borrower_name === '取消预约1', '第一位被锁定')
+
+    console.log('  → 取消锁定预约后自动锁定下一位')
+    const cancelRes = await request('PUT', `/reservations/${lockedResv.id}/cancel`, {
+      cancel_reason: '不需要了',
+      expected_version: lockedResv.version,
+    }, admin)
+    assert(cancelRes.status === 200, '取消锁定预约成功')
+
+    const equipStatus = await getEquipmentStatus(admin, equipId)
+    assert(equipStatus === 'reserved', '取消后设备仍为 reserved')
+
+    const { data: afterCancelData } = await request('GET', `/reservations?equipment_id=${equipId}`, undefined, admin)
+    const afterCancel = afterCancelData.data as any[]
+    const newLocked = afterCancel.find((r: any) => r.status === 'locked')
+    const queued = afterCancel.filter((r: any) => r.status === 'queued')
+    assert(!!newLocked, '取消后自动锁定下一位')
+    assert(newLocked.borrower_name === '取消预约2', '下一位是预约2')
+    assert(queued.length === 0, '没有排队中的了')
+
+    const equipDetail = await getEquipmentDetail(admin, equipId)
+    assert(equipDetail.equipment.locked_reservation_id === newLocked.id, '设备锁定ID更新为新的锁定预约')
+  } finally {
+    await resetEquipment(admin, equipId)
+  }
+}
+
+async function testCrossRestartRecovery() {
+  console.log('\n📋 测试组 4：跨重启持久化校验')
+  const admin = await getAdminToken()
+  const equipId = await createTestEquipment(admin, '持久化测试设备')
+
+  try {
+    await borrowEquipment(admin, equipId, '持久借用人', '13800000030')
+    await createReservation(admin, equipId, '持久预约1', '13800000031')
+    await createReservation(admin, equipId, '持久预约2', '13800000032')
+
+    const { data: borrowData } = await request('GET', '/borrows?status=borrowed', undefined, admin)
+    const record = borrowData.data.find((r: any) => r.equipment_id === equipId)
+    await returnEquipment(admin, record.id)
+
+    const equipStatus = await getEquipmentStatus(admin, equipId)
+    assert(equipStatus === 'reserved', '归还后设备为 reserved')
+
+    let { data: resvData } = await request('GET', `/reservations?equipment_id=${equipId}`, undefined, admin)
+    let locked = resvData.data.find((r: any) => r.status === 'locked')
+    let queued = resvData.data.find((r: any) => r.status === 'queued')
+    assert(!!locked, '有一位被锁定')
+    assert(!!queued, '有一位在排队')
+
+    const lockedId = locked.id
+    const lockedAt = locked.locked_at
+    const lockExpiresAt = locked.lock_expires_at
+
+    console.log('  → 重新查询验证锁定状态持久化（模拟重启）')
     const { data: resvRefresh } = await request('GET', `/reservations?equipment_id=${equipId}`, undefined, admin)
-    const statuses = resvRefresh.data.map((r: any) => r.status)
-    const hasQueued = statuses.includes('queued')
-    const hasNotified = statuses.includes('notified')
-    assert(hasQueued && hasNotified, '刷新后排队和已通知状态都在')
-    const equipRefresh = await getEquipmentStatus(admin, equipId)
-    assert(equipRefresh === 'reserved', '刷新后设备仍为 reserved')
+    const refreshedLocked = resvRefresh.data.find((r: any) => r.status === 'locked')
+    assert(!!refreshedLocked, '刷新后锁定状态仍存在')
+    assert(refreshedLocked.id === lockedId, '锁定预约ID不变')
+    assert(refreshedLocked.locked_at === lockedAt, '锁定时间不变')
+    assert(refreshedLocked.lock_expires_at === lockExpiresAt, '超时时间不变')
 
-    console.log('  → 取消已通知预约后自动通知下一位')
-    const notifiedResv = resvRefresh.data.find((r: any) => r.status === 'notified')
-    if (notifiedResv) {
-      const cancelRes = await request('PUT', `/reservations/${notifiedResv.id}/cancel`, {
-        cancel_reason: '测试取消',
-        expected_version: notifiedResv.version,
-      }, admin)
-      assert(cancelRes.status === 200, '取消已通知预约成功')
+    const equipRefresh = await getEquipmentDetail(admin, equipId)
+    assert(equipRefresh.equipment.status === 'reserved', '刷新后设备仍为 reserved')
+    assert(equipRefresh.equipment.locked_reservation_id === lockedId, '刷新后设备锁定ID不变')
 
-      const { data: resvAfterCancel } = await request('GET', `/reservations?equipment_id=${equipId}`, undefined, admin)
-      const queuedAfterCancel = resvAfterCancel.data.filter((r: any) => r.status === 'queued')
-      const notifiedAfterCancel = resvAfterCancel.data.filter((r: any) => r.status === 'notified')
-      assert(notifiedAfterCancel.length === 1, '取消后自动通知下一位')
-      assert(queuedAfterCancel.length === 0, '取消后无排队中')
+    console.log('  → 取消锁定后恢复给下一位')
+    const cancelRes = await request('PUT', `/reservations/${refreshedLocked.id}/cancel`, {
+      cancel_reason: '测试取消',
+      expected_version: refreshedLocked.version,
+    }, admin)
+    assert(cancelRes.status === 200, '取消锁定预约成功')
 
-      const equipAfterCancel = await getEquipmentStatus(admin, equipId)
-      assert(equipAfterCancel === 'reserved', '取消后设备仍为 reserved')
-    }
+    const { data: resvAfterCancel } = await request('GET', `/reservations?equipment_id=${equipId}`, undefined, admin)
+    const newLocked = resvAfterCancel.data.find((r: any) => r.status === 'locked')
+    assert(!!newLocked, '取消后自动锁定下一位')
+    assert(newLocked.borrower_name === '持久预约2', '下一位被锁定')
+  } finally {
+    await resetEquipment(admin, equipId)
+  }
+}
+
+async function testConcurrentConflict() {
+  console.log('\n📋 测试组 5：并发冲突校验')
+  const admin = await getAdminToken()
+  const equipId = await createTestEquipment(admin, '并发冲突测试设备')
+
+  try {
+    await borrowEquipment(admin, equipId, '并发借用人', '13800000040')
+    await createReservation(admin, equipId, '并发预约1', '13800000041')
+    await createReservation(admin, equipId, '并发预约2', '13800000042')
+
+    const { data: borrowData } = await request('GET', '/borrows?status=borrowed', undefined, admin)
+    const record = borrowData.data.find((r: any) => r.equipment_id === equipId)
+    await returnEquipment(admin, record.id)
+
+    const { data: resvData } = await request('GET', `/reservations?equipment_id=${equipId}`, undefined, admin)
+    const lockedResv = resvData.data.find((r: any) => r.status === 'locked')
+
+    console.log('  → 两个窗口同时尝试用非锁定人借出已锁定设备')
+    const [res1, res2] = await Promise.all([
+      request('POST', '/borrows', {
+        equipment_id: equipId,
+        borrower_name: '并发预约2',
+        borrower_phone: '13800000042',
+      }, admin),
+      request('POST', '/borrows', {
+        equipment_id: equipId,
+        borrower_name: '并发预约2',
+        borrower_phone: '13800000042',
+      }, admin),
+    ])
+    const bothBlocked = (res1.status === 403 ? 1 : 0) + (res2.status === 403 ? 1 : 0)
+    assert(bothBlocked === 2, '两个窗口同时用非锁定人借出都被拦截')
+
+    console.log('  → 两个窗口同时尝试用锁定人借出，只有一个能成功')
+    const [borrow1, borrow2] = await Promise.all([
+      request('POST', '/borrows', {
+        equipment_id: equipId,
+        borrower_name: lockedResv.borrower_name,
+        borrower_phone: lockedResv.borrower_phone,
+      }, admin),
+      request('POST', '/borrows', {
+        equipment_id: equipId,
+        borrower_name: lockedResv.borrower_name,
+        borrower_phone: lockedResv.borrower_phone,
+      }, admin),
+    ])
+    const successCount = (borrow1.status === 201 ? 1 : 0) + (borrow2.status === 201 ? 1 : 0)
+    assert(successCount === 1, '并发借出只有一个成功')
+    const conflictCount = (borrow1.status === 409 ? 1 : 0) + (borrow2.status === 409 ? 1 : 0) +
+      (borrow1.status === 403 ? 1 : 0) + (borrow2.status === 403 ? 1 : 0) +
+      (borrow1.status === 400 ? 1 : 0) + (borrow2.status === 400 ? 1 : 0)
+    assert(conflictCount >= 1, '失败的请求返回冲突、权限或状态错误')
   } finally {
     await resetEquipment(admin, equipId)
   }
 }
 
 async function testExportConsistency() {
-  console.log('\n📋 测试组 4：导出一致性校验')
+  console.log('\n📋 测试组 6：导出一致性校验')
   const admin = await getAdminToken()
-  const equipId = await createTestEquipment(admin, '导出测试设备-唯一')
+  const equipId = await createTestEquipment(admin, '导出锁定测试-唯一')
 
   try {
     await borrowEquipment(admin, equipId, '导出借用人', '13800000050')
-    await createReservation(admin, equipId, '导出预约人-唯一', '13800000051')
+    await createReservation(admin, equipId, '导出锁定预约-唯一', '13800000051')
 
     const { data: borrowData } = await request('GET', '/borrows?status=borrowed', undefined, admin)
     const record = borrowData.data.find((r: any) => r.equipment_id === equipId)
@@ -301,37 +376,38 @@ async function testExportConsistency() {
     const equipStatus = await getEquipmentStatus(admin, equipId)
     assert(equipStatus === 'reserved', '导出前设备为 reserved')
 
-    const { data: resvCheck } = await request('GET', `/reservations?equipment_id=${equipId}`, undefined, admin)
-    const exportResv = resvCheck.data.find((r: any) => r.borrower_name === '导出预约人-唯一')
-    const expectedStatus = exportResv ? (exportResv.status === 'notified' ? '已通知' : '排队中') : '未知'
-
-    console.log('  → 设备 CSV 导出状态一致')
+    console.log('  → 设备 CSV 导出包含锁定预约人')
     const equipCsvRes = await fetch(`${BASE}/export/equipments`, {
       headers: { Authorization: `Bearer ${admin}` },
     })
     const equipCsv = await equipCsvRes.text()
-    const equipRow = equipCsv.split('\n').find((line: string) => line.includes('导出测试设备-唯一'))
+    const equipRow = equipCsv.split('\n').find((line: string) => line.includes('导出锁定测试-唯一'))
     assert(!!equipRow, '设备 CSV 包含测试设备')
     assert(equipRow!.includes('已预约'), '设备 CSV 状态显示「已预约」')
+    assert(equipRow!.includes('导出锁定预约-唯一'), '设备 CSV 包含锁定预约人')
 
-    console.log('  → 预约 CSV 导出包含正确状态')
+    console.log('  → 预约 CSV 导出包含正确锁定状态')
     const resvCsvRes = await fetch(`${BASE}/export/reservations`, {
       headers: { Authorization: `Bearer ${admin}` },
     })
-    const resvCsv = await resvCsvRes.text()
-    const resvRow = resvCsv.split('\n').find((line: string) => line.includes('导出预约人-唯一'))
+    const resvCsvText = await resvCsvRes.text()
+    const resvCsvLines = resvCsvText.split('\n')
+    const resvHeader = resvCsvLines[0]
+    const resvRow = resvCsvLines.find((line: string) => line.includes('导出锁定预约-唯一'))
     assert(!!resvRow, '预约 CSV 包含测试预约')
-    assert(resvRow!.includes(expectedStatus), `预约 CSV 状态显示「${expectedStatus}」(实际状态: ${exportResv?.status})`)
+    assert(resvRow!.includes('已锁定'), '预约 CSV 状态显示「已锁定」')
+    assert(resvHeader.includes('锁定时间'), '预约 CSV 表头包含锁定时间列')
+    assert(resvHeader.includes('锁定超时时间'), '预约 CSV 表头包含锁定超时时间列')
   } finally {
     await resetEquipment(admin, equipId)
   }
 }
 
 async function testEndToEndFlow() {
-  console.log('\n📋 测试组 5：端到端用户链路')
+  console.log('\n📋 测试组 7：端到端用户链路（从通知到取件完成）')
   const admin = await getAdminToken()
   const frontDesk = await getFrontDeskToken()
-  const equipId = await createTestEquipment(admin, '链路测试设备')
+  const equipId = await createTestEquipment(admin, '链路锁定测试设备')
 
   try {
     console.log('  步骤 1: 前台借出设备')
@@ -345,75 +421,82 @@ async function testEndToEndFlow() {
     const resv2 = await createReservation(frontDesk, equipId, '链路预约2', '13800000062')
     assert(resv2.status === 201, '预约2创建成功')
 
-    console.log('  步骤 3: 可借设备不能创建预约（接口级别）')
-    const availEquipId = await createTestEquipment(admin, '链路可借设备')
-    const resv3 = await createReservation(frontDesk, availEquipId, '链路预约3', '13800000063')
-    assert(resv3.status === 400, '可借设备创建预约被拒绝')
-    await resetEquipment(admin, availEquipId)
-
-    console.log('  步骤 4: 归还设备，验证自动通知和状态变更')
+    console.log('  步骤 3: 归还设备，验证自动锁定')
     const returnResult = await returnEquipment(frontDesk, borrowId)
     equipStatus = await getEquipmentStatus(admin, equipId)
     assert(equipStatus === 'reserved', '归还后设备为 reserved')
     assert(!!returnResult.next_reservation, '归还响应包含下一位预约人')
+    assert(returnResult.next_reservation?.status === 'locked', '下一位预约人状态为 locked')
     assert(returnResult.next_reservation?.borrower_name === '链路预约1', '下一位是预约1')
 
-    console.log('  步骤 5: 通知预约人取用设备')
-    const notifiedResv = returnResult.next_reservation
-    const borrowRes = await request('POST', '/borrows', {
+    console.log('  步骤 4: 管理员不可越权借出给队列外的人')
+    let borrowRes = await request('POST', '/borrows', {
       equipment_id: equipId,
-      borrower_name: notifiedResv.borrower_name,
-      borrower_phone: notifiedResv.borrower_phone,
+      borrower_name: '无关人',
+      borrower_phone: '13800000099',
+    }, admin)
+    assert(borrowRes.status === 403, '管理员越权借出被拦截')
+
+    console.log('  步骤 5: 锁定预约人前台取件')
+    const lockedResv = returnResult.next_reservation
+    borrowRes = await request('POST', '/borrows', {
+      equipment_id: equipId,
+      borrower_name: lockedResv.borrower_name,
+      borrower_phone: lockedResv.borrower_phone,
     }, frontDesk)
-    assert(borrowRes.status === 201, '通知预约人可借出设备')
+    assert(borrowRes.status === 201, '锁定预约人前台可取件')
     equipStatus = await getEquipmentStatus(admin, equipId)
-    assert(equipStatus === 'borrowed', '取用后设备为 borrowed')
+    assert(equipStatus === 'borrowed', '取件后设备为 borrowed')
 
     const { data: resvData } = await request('GET', `/reservations?equipment_id=${equipId}`, undefined, admin)
     const completedResv = resvData.data.filter((r: any) => r.status === 'completed')
     assert(completedResv.length >= 1, '预约1自动完成')
 
-    console.log('  步骤 6: 再次归还，自动通知预约2')
+    console.log('  步骤 6: 再次归还，自动锁定预约2')
     const { data: borrowData } = await request('GET', '/borrows?status=borrowed', undefined, admin)
     const record2 = borrowData.data.find((r: any) => r.equipment_id === equipId)
     const returnResult2 = await returnEquipment(frontDesk, record2.id)
     equipStatus = await getEquipmentStatus(admin, equipId)
     assert(equipStatus === 'reserved', '再次归还后设备为 reserved')
+    assert(returnResult2.next_reservation?.status === 'locked', '下一位也是 locked')
     assert(returnResult2.next_reservation?.borrower_name === '链路预约2', '下一位是预约2')
 
-    console.log('  步骤 7: 取消预约2，设备应变为可借')
+    console.log('  步骤 7: 取消锁定预约，设备应变为可借')
     const { data: resvData2 } = await request('GET', `/reservations?equipment_id=${equipId}`, undefined, admin)
-    const resv2Data = resvData2.data.find((r: any) => r.borrower_name === '链路预约2')
-    if (resv2Data || returnResult2.next_reservation) {
-      const cancelTarget = returnResult2.next_reservation || resv2Data
-      const cancelRes = await request('PUT', `/reservations/${cancelTarget.id}/cancel`, {
+    const locked2 = resvData2.data.find((r: any) => r.status === 'locked')
+    if (locked2) {
+      const cancelRes = await request('PUT', `/reservations/${locked2.id}/cancel`, {
         cancel_reason: '不需要了',
-        expected_version: cancelTarget.version,
+        expected_version: locked2.version,
       }, frontDesk)
-      assert(cancelRes.status === 200, '取消预约2成功')
+      assert(cancelRes.status === 200, '取消锁定预约成功')
       equipStatus = await getEquipmentStatus(admin, equipId)
       assert(equipStatus === 'available', '取消所有预约后设备变为 available')
     }
 
-    console.log('  步骤 8: 操作日志记录关键变更')
+    console.log('  步骤 8: 操作日志记录关键流转')
     const detail = await getEquipmentDetail(admin, equipId)
     const logs = detail.operation_logs
     const hasBorrowLog = logs.some((l: any) => l.action === 'borrow')
     const hasReturnLog = logs.some((l: any) => l.action === 'return')
-    const hasAutoNotifyLog = logs.some((l: any) => l.action === 'reservation_auto_notify')
+    const hasAutoLockLog = logs.some((l: any) => l.action === 'reservation_auto_lock')
+    const hasCancelLog = logs.some((l: any) => l.action === 'reservation_cancel')
+    const hasCompleteLog = logs.some((l: any) => l.action === 'reservation_auto_complete')
     assert(hasBorrowLog, '操作日志包含借出记录')
     assert(hasReturnLog, '操作日志包含归还记录')
-    assert(hasAutoNotifyLog, '操作日志包含自动通知记录')
+    assert(hasAutoLockLog, '操作日志包含自动锁定记录')
+    assert(hasCancelLog, '操作日志包含取消记录')
+    assert(hasCompleteLog, '操作日志包含自动完成记录')
   } finally {
     await resetEquipment(admin, equipId)
   }
 }
 
-async function testRoleBasedAccess() {
-  console.log('\n📋 测试组 6：角色权限校验')
+async function testRoleBoundaries() {
+  console.log('\n📋 测试组 8：角色权限边界校验')
   const admin = await getAdminToken()
   const frontDesk = await getFrontDeskToken()
-  const equipId = await createTestEquipment(admin, '权限测试设备')
+  const equipId = await createTestEquipment(admin, '权限边界测试设备')
 
   try {
     await borrowEquipment(admin, equipId, '权限借用人', '13800000070')
@@ -422,50 +505,183 @@ async function testRoleBasedAccess() {
     const resvRes = await createReservation(frontDesk, equipId, '权限预约人', '13800000071')
     assert(resvRes.status === 201, '前台可创建预约')
 
+    console.log('  → 前台不可手动锁定')
+    const { data: resvData } = await request('GET', `/reservations?equipment_id=${equipId}`, undefined, frontDesk)
+    const myResv = resvData.data.find((r: any) => r.borrower_name === '权限预约人')
+    if (myResv) {
+      const lockRes = await request('PUT', `/reservations/${myResv.id}/lock`, undefined, frontDesk)
+      assert(lockRes.status === 403, '前台不可手动锁定')
+    }
+
+    console.log('  → 管理员可手动锁定')
+    if (myResv) {
+      const lockRes = await request('PUT', `/reservations/${myResv.id}/lock`, undefined, admin)
+      assert(lockRes.status === 200, '管理员可手动锁定')
+      assert(lockRes.data?.data?.status === 'locked', '锁定后状态为 locked')
+      assert(!!lockRes.data?.data?.lock_expires_at, '锁定后超时时间已设置')
+    }
+
+    console.log('  → 前台不可释放锁定')
+    const { data: resvData2 } = await request('GET', `/reservations?equipment_id=${equipId}`, undefined, admin)
+    const lockedResv = resvData2.data.find((r: any) => r.status === 'locked')
+    if (lockedResv) {
+      const releaseRes = await request('PUT', `/reservations/${lockedResv.id}/release-lock`, {
+        expected_version: lockedResv.version,
+      }, frontDesk)
+      assert(releaseRes.status === 403, '前台不可释放锁定')
+    }
+
+    console.log('  → 管理员可释放锁定')
+    if (lockedResv) {
+      const releaseRes = await request('PUT', `/reservations/${lockedResv.id}/release-lock`, {
+        expected_version: lockedResv.version,
+      }, admin)
+      assert(releaseRes.status === 200, '管理员可释放锁定')
+    }
+
     console.log('  → 前台不可导出 CSV')
     const exportRes = await fetch(`${BASE}/export/equipments`, {
       headers: { Authorization: `Bearer ${frontDesk}` },
     })
     assert(exportRes.status === 403, '前台不可导出设备 CSV')
 
-    const exportResvRes = await fetch(`${BASE}/export/reservations`, {
-      headers: { Authorization: `Bearer ${frontDesk}` },
-    })
-    assert(exportResvRes.status === 403, '前台不可导出预约 CSV')
-
-    console.log('  → 前台可通知/完成/取消自己的预约')
-    const { data: resvData } = await request('GET', `/reservations?equipment_id=${equipId}`, undefined, frontDesk)
-    const myResv = resvData.data.find((r: any) => r.borrower_name === '权限预约人')
-    if (myResv) {
-      const notifyRes = await request('PUT', `/reservations/${myResv.id}/notify`, undefined, frontDesk)
-      assert(notifyRes.status === 200, '前台可通知自己的预约')
-
-      const { data: refreshedResv } = await request('GET', `/reservations?equipment_id=${equipId}`, undefined, frontDesk)
-      const refreshedMyResv = refreshedResv.data.find((r: any) => r.borrower_name === '权限预约人')
-
-      const completeRes = await request('PUT', `/reservations/${refreshedMyResv.id}/complete`, {
-        expected_version: refreshedMyResv.version,
+    console.log('  → 前台不可重排预约顺序')
+    const { data: allResv } = await request('GET', '/reservations', undefined, admin)
+    if (allResv.data.length > 0) {
+      const firstResv = allResv.data[0]
+      const reorderRes = await request('PUT', '/reservations/reorder', {
+        equipment_id: firstResv.equipment_id,
+        orders: [{ id: firstResv.id, queue_order: 0 }],
       }, frontDesk)
-      assert(completeRes.status === 200, '前台可完成自己的预约')
-    }
-
-    console.log('  → 前台不可操作他人经手的预约')
-    const adminResvRes = await createReservation(admin, equipId, '管理员预约人', '13800000072')
-    if (adminResvRes.status === 201) {
-      const { data: adminResvData } = await request('GET', `/reservations?equipment_id=${equipId}`, undefined, admin)
-      const adminResv = adminResvData.data.find((r: any) => r.borrower_name === '管理员预约人')
-      if (adminResv) {
-        const notifyOtherRes = await request('PUT', `/reservations/${adminResv.id}/notify`, undefined, frontDesk)
-        assert(notifyOtherRes.status === 403, '前台不可通知他人经手的预约')
-      }
+      assert(reorderRes.status === 403, '前台重排预约返回 403')
     }
   } finally {
     await resetEquipment(admin, equipId)
   }
 }
 
+async function testManualLockAndExpiredStatus() {
+  console.log('\n📋 测试组 9：手动锁定与超时状态校验')
+  const admin = await getAdminToken()
+  const equipId = await createTestEquipment(admin, '手动锁定测试设备')
+
+  try {
+    await borrowEquipment(admin, equipId, '手动借用人', '13800000080')
+    await createReservation(admin, equipId, '手动预约1', '13800000081')
+    await createReservation(admin, equipId, '手动预约2', '13800000082')
+
+    const { data: resvData } = await request('GET', `/reservations?equipment_id=${equipId}`, undefined, admin)
+    const firstResv = resvData.data.find((r: any) => r.status === 'queued' && r.queue_order === 0)
+
+    console.log('  → 管理员手动锁定排队中的预约')
+    const lockRes = await request('PUT', `/reservations/${firstResv.id}/lock`, undefined, admin)
+    assert(lockRes.status === 200, '手动锁定成功')
+    assert(lockRes.data?.data?.status === 'locked', '锁定后状态为 locked')
+
+    const equipDetail = await getEquipmentDetail(admin, equipId)
+    assert(equipDetail.equipment.status === 'reserved', '手动锁定后设备为 reserved')
+    assert(equipDetail.equipment.locked_reservation_id === firstResv.id, '设备锁定ID指向手动锁定的预约')
+
+    console.log('  → 已锁定设备不能再锁定其他预约')
+    const secondResv = resvData.data.find((r: any) => r.status === 'queued' && r.queue_order === 1)
+    if (secondResv) {
+      const secondLockRes = await request('PUT', `/reservations/${secondResv.id}/lock`, undefined, admin)
+      assert(secondLockRes.status === 409, '重复锁定返回 409')
+      assert(secondLockRes.data.conflict?.type === 'equipment_already_locked', '冲突类型为 equipment_already_locked')
+    }
+
+    console.log('  → 释放锁定后自动锁定下一位')
+    const { data: refreshedResvData } = await request('GET', `/reservations?equipment_id=${equipId}`, undefined, admin)
+    const lockedResv = refreshedResvData.data.find((r: any) => r.status === 'locked')
+    if (lockedResv) {
+      const { data: refreshedAll } = await request('GET', `/reservations?equipment_id=${equipId}`, undefined, admin)
+      const refreshed = refreshedAll.data.find((r: any) => r.id === lockedResv.id)
+      if (!refreshed) { assert(false, '找不到锁定的预约'); return }
+      const releaseRes = await request('PUT', `/reservations/${lockedResv.id}/release-lock`, {
+        expected_version: refreshed.version,
+      }, admin)
+      assert(releaseRes.status === 200, '释放锁定成功')
+      assert(releaseRes.data?.data?.status === 'cancelled', '释放后预约状态为 cancelled')
+
+      const { data: afterRelease } = await request('GET', `/reservations?equipment_id=${equipId}`, undefined, admin)
+      const newLocked = afterRelease.data.find((r: any) => r.status === 'locked')
+      assert(!!newLocked, '释放后自动锁定下一位')
+    }
+
+    console.log('  → 操作日志包含关键动作')
+    const logs = (await getEquipmentDetail(admin, equipId)).operation_logs
+    const hasManualLockLog = logs.some((l: any) => l.action === 'reservation_manual_lock')
+    const hasReleaseLockLog = logs.some((l: any) => l.action === 'reservation_release_lock')
+    assert(hasManualLockLog, '操作日志包含手动锁定记录')
+    assert(hasReleaseLockLog, '操作日志包含释放锁定记录')
+  } finally {
+    await resetEquipment(admin, equipId)
+  }
+}
+
+async function testNoDirtyRecordsAfterCompletion() {
+  console.log('\n📋 测试组 10：完成取件后无脏记录校验')
+  const admin = await getAdminToken()
+  const equipId = await createTestEquipment(admin, '脏记录测试设备')
+
+  try {
+    await borrowEquipment(admin, equipId, '脏记录借用人', '13800000090')
+    await createReservation(admin, equipId, '脏记录预约1', '13800000091')
+    await createReservation(admin, equipId, '脏记录预约2', '13800000092')
+
+    const { data: borrowData } = await request('GET', '/borrows?status=borrowed', undefined, admin)
+    const record = borrowData.data.find((r: any) => r.equipment_id === equipId)
+    await returnEquipment(admin, record.id)
+
+    const { data: lockedResvRaw } = await request('GET', `/reservations?equipment_id=${equipId}`, undefined, admin)
+    const lockedResv = lockedResvRaw.data.find((r: any) => r.status === 'locked')
+
+    console.log('  → 锁定预约人取件后，预约状态、设备状态、排队全部更新')
+    await request('POST', '/borrows', {
+      equipment_id: equipId,
+      borrower_name: lockedResv.borrower_name,
+      borrower_phone: lockedResv.borrower_phone,
+    }, admin)
+
+    const equipStatus = await getEquipmentStatus(admin, equipId)
+    assert(equipStatus === 'borrowed', '取件后设备为 borrowed')
+
+    const { data: resvData } = await request('GET', `/reservations?equipment_id=${equipId}`, undefined, admin)
+    const activeRecords = resvData.data.filter((r: any) => r.status === 'queued' || r.status === 'notified' || r.status === 'locked')
+    const completedRecords = resvData.data.filter((r: any) => r.status === 'completed')
+    assert(activeRecords.length === 1, '取件后只有1条活跃预约（排队中的预约2）')
+    assert(completedRecords.length === 1, '取件后有1条已完成预约')
+    assert(activeRecords[0].borrower_name === '脏记录预约2', '活跃的是预约2')
+
+    console.log('  → 归还再取件，所有预约都应为已完成')
+    const { data: borrowData2 } = await request('GET', '/borrows?status=borrowed', undefined, admin)
+    const record2 = borrowData2.data.find((r: any) => r.equipment_id === equipId)
+    await returnEquipment(admin, record2.id)
+
+    const { data: lockedResv2Raw } = await request('GET', `/reservations?equipment_id=${equipId}`, undefined, admin)
+    const lockedResv2 = lockedResv2Raw.data.find((r: any) => r.status === 'locked')
+
+    await request('POST', '/borrows', {
+      equipment_id: equipId,
+      borrower_name: lockedResv2.borrower_name,
+      borrower_phone: lockedResv2.borrower_phone,
+    }, admin)
+
+    const { data: finalResvData } = await request('GET', `/reservations?equipment_id=${equipId}`, undefined, admin)
+    const dirtyRecords = finalResvData.data.filter((r: any) => r.status === 'queued' || r.status === 'notified' || r.status === 'locked')
+    assert(dirtyRecords.length === 0, '所有预约完成后无脏记录')
+    const allCompleted = finalResvData.data.filter((r: any) => r.status === 'completed')
+    assert(allCompleted.length === 2, '两条预约都已完成')
+
+    const finalEquipStatus = await getEquipmentStatus(admin, equipId)
+    assert(finalEquipStatus === 'borrowed', '所有预约取件后设备为 borrowed（被最后一人借出）')
+  } finally {
+    await resetEquipment(admin, equipId)
+  }
+}
+
 async function main() {
-  console.log('🚀 预约系统回归测试开始\n')
+  console.log('🚀 预约取件锁定台回归测试开始\n')
   console.log('检查服务器连接...')
 
   try {
@@ -480,12 +696,16 @@ async function main() {
     process.exit(1)
   }
 
-  await testForbiddenCases()
-  await testConcurrencyConflict()
-  await testPersistenceAcrossRestart()
+  await testLockActivationOnReturn()
+  await testUnauthorizedIntercept()
+  await testCancelReleasesLockAndAutoLocksNext()
+  await testCrossRestartRecovery()
+  await testConcurrentConflict()
   await testExportConsistency()
   await testEndToEndFlow()
-  await testRoleBasedAccess()
+  await testRoleBoundaries()
+  await testManualLockAndExpiredStatus()
+  await testNoDirtyRecordsAfterCompletion()
 
   console.log('\n' + '='.repeat(60))
   console.log(`📊 测试结果：通过 ${passed} / 失败 ${failed} / 总计 ${passed + failed}`)

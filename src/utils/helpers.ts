@@ -40,13 +40,17 @@ export const DEPOSIT_TYPE_COLORS: Record<string, string> = {
 export const RESERVATION_STATUS_LABELS: Record<string, string> = {
   queued: "排队中",
   notified: "已通知",
+  locked: "已锁定",
   completed: "已完成",
   cancelled: "已取消",
+  expired: "已超时",
 };
 
 export const RESERVATION_STATUS_COLORS: Record<string, string> = {
   queued: "bg-amber-100 text-amber-800",
   notified: "bg-blue-100 text-blue-800",
+  locked: "bg-purple-100 text-purple-800",
   completed: "bg-green-100 text-green-800",
   cancelled: "bg-gray-100 text-gray-600",
+  expired: "bg-red-100 text-red-700",
 };

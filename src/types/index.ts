@@ -11,6 +11,7 @@ export interface Equipment {
   status: "available" | "borrowed" | "reserved" | "damaged" | "pending_confirm";
   deposit_amount: number;
   notes: string;
+  locked_reservation_id: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -63,7 +64,7 @@ export interface EquipmentDetail {
   reservations: Reservation[];
 }
 
-export type ReservationStatus = "queued" | "notified" | "completed" | "cancelled";
+export type ReservationStatus = "queued" | "notified" | "locked" | "completed" | "cancelled" | "expired";
 
 export interface Reservation {
   id: number;
@@ -80,6 +81,9 @@ export interface Reservation {
   operator_name: string;
   version: number;
   notified_at: string | null;
+  locked_at: string | null;
+  lock_expires_at: string | null;
+  expired_at: string | null;
   completed_at: string | null;
   cancelled_at: string | null;
   cancel_reason: string;

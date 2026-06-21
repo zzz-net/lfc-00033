@@ -121,7 +121,7 @@ db.exec(`
     borrower_phone TEXT NOT NULL,
     expected_pickup_time TEXT,
     notes TEXT DEFAULT '',
-    status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued', 'notified', 'completed', 'cancelled')),
+    status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued', 'notified', 'locked', 'completed', 'cancelled', 'expired')),
     queue_order INTEGER NOT NULL DEFAULT 0,
     operator_id INTEGER NOT NULL REFERENCES users(id),
     operator_name TEXT NOT NULL,
@@ -215,11 +215,60 @@ const needResCols = [
   { name: 'completed_at', def: 'TEXT' },
   { name: 'cancelled_at', def: 'TEXT' },
   { name: 'cancel_reason', def: 'TEXT DEFAULT ""' },
+  { name: 'locked_at', def: 'TEXT' },
+  { name: 'lock_expires_at', def: 'TEXT' },
+  { name: 'expired_at', def: 'TEXT' },
 ]
 for (const col of needResCols) {
   if (!resColNames.has(col.name)) {
     db.prepare(`ALTER TABLE reservations ADD COLUMN ${col.name} ${col.def}`).run()
   }
+}
+
+const resStatusCheck = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='reservations'").get() as { sql: string } | undefined
+if (resStatusCheck && !resStatusCheck.sql.includes("'locked'")) {
+  const tx = db.transaction(() => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS reservations_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        equipment_id INTEGER NOT NULL REFERENCES equipments(id),
+        borrower_name TEXT NOT NULL,
+        borrower_phone TEXT NOT NULL,
+        expected_pickup_time TEXT,
+        notes TEXT DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued', 'notified', 'locked', 'completed', 'cancelled', 'expired')),
+        queue_order INTEGER NOT NULL DEFAULT 0,
+        operator_id INTEGER NOT NULL REFERENCES users(id),
+        operator_name TEXT NOT NULL,
+        version INTEGER NOT NULL DEFAULT 1,
+        notified_at TEXT,
+        completed_at TEXT,
+        cancelled_at TEXT,
+        cancel_reason TEXT DEFAULT '',
+        locked_at TEXT,
+        lock_expires_at TEXT,
+        expired_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+      );
+      INSERT INTO reservations_new SELECT * FROM reservations;
+      DROP TABLE reservations;
+      ALTER TABLE reservations_new RENAME TO reservations;
+    `)
+  })
+  tx()
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_reservations_equipment ON reservations(equipment_id);
+    CREATE INDEX IF NOT EXISTS idx_reservations_status ON reservations(status);
+    CREATE INDEX IF NOT EXISTS idx_reservations_borrower ON reservations(borrower_name, borrower_phone);
+  `)
+}
+
+const equipColumns = db.prepare("PRAGMA table_info(equipments)").all() as { name: string }[]
+const equipColNames = new Set(equipColumns.map(c => c.name))
+if (!equipColNames.has('locked_reservation_id')) {
+  db.prepare('ALTER TABLE equipments ADD COLUMN locked_reservation_id INTEGER REFERENCES reservations(id)').run()
 }
 
 const logCount = db.prepare('SELECT COUNT(*) as count FROM view_operation_logs').get() as { count: number }
@@ -270,10 +319,17 @@ if (equipStatusCheck && !equipStatusCheck.sql.includes("'reserved'")) {
         status TEXT NOT NULL DEFAULT 'available' CHECK(status IN ('available', 'borrowed', 'reserved', 'damaged', 'pending_confirm')),
         deposit_amount REAL NOT NULL DEFAULT 0,
         notes TEXT DEFAULT '',
+        locked_reservation_id INTEGER REFERENCES reservations(id),
         created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
         updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
       );
-      INSERT INTO equipments_new SELECT * FROM equipments;
+    `)
+    if (equipColNames.has('locked_reservation_id')) {
+      db.exec(`INSERT INTO equipments_new SELECT * FROM equipments;`)
+    } else {
+      db.exec(`INSERT INTO equipments_new (id, name, type, status, deposit_amount, notes, created_at, updated_at) SELECT id, name, type, status, deposit_amount, notes, created_at, updated_at FROM equipments;`)
+    }
+    db.exec(`
       DROP TABLE equipments;
       ALTER TABLE equipments_new RENAME TO equipments;
     `)

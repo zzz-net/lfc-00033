@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from 'express'
 import db from '../db.js'
 import { authMiddleware, adminMiddleware } from '../middleware/auth.js'
+import { resolveExpiredLocks, autoLockNextIfNeeded, PICKUP_LOCK_TIMEOUT_MINUTES } from './reservations.js'
 
 const router = Router()
 
@@ -18,6 +19,7 @@ router.post('/', authMiddleware, (req: Request, res: Response): void => {
     type: string
     status: string
     deposit_amount: number
+    locked_reservation_id: number | null
   } | undefined
 
   if (!equipment) {
@@ -36,36 +38,85 @@ router.post('/', authMiddleware, (req: Request, res: Response): void => {
   }
 
   if (equipment.status === 'reserved') {
-    const notifiedReservation = db.prepare(
-      `SELECT * FROM reservations 
-       WHERE equipment_id = ? AND status = 'notified'
-       ORDER BY queue_order ASC LIMIT 1`
-    ).get(equipment_id) as { id: number; borrower_name: string; borrower_phone: string; queue_order: number } | undefined
+    resolveExpiredLocks(equipment_id, req.user!.id, req.user!.username)
 
-    if (notifiedReservation) {
-      const operator = req.user!
-      if (operator.role !== 'admin' &&
-          (notifiedReservation.borrower_name !== borrower_name.trim() ||
-           notifiedReservation.borrower_phone !== borrower_phone.trim())) {
-        res.status(403).json({
-          success: false,
-          error: `该设备已预约给 ${notifiedReservation.borrower_name}(${notifiedReservation.borrower_phone})，仅限该预约人借出`,
-        })
-        return
+    const refreshedEquip = db.prepare('SELECT locked_reservation_id FROM equipments WHERE id = ?').get(equipment_id) as { locked_reservation_id: number | null }
+
+    if (refreshedEquip.locked_reservation_id) {
+      const lockedReservation = db.prepare(
+        'SELECT * FROM reservations WHERE id = ? AND status = \'locked\''
+      ).get(refreshedEquip.locked_reservation_id) as { id: number; borrower_name: string; borrower_phone: string; queue_order: number; lock_expires_at: string } | undefined
+
+      if (lockedReservation) {
+        if (lockedReservation.borrower_name !== borrower_name.trim() ||
+            lockedReservation.borrower_phone !== borrower_phone.trim()) {
+          res.status(403).json({
+            success: false,
+            error: `该设备已锁定给预约人 ${lockedReservation.borrower_name}(${lockedReservation.borrower_phone})，仅限该预约人取件，管理员也不可越权借出`,
+            conflict: {
+              type: 'pickup_lock_mismatch',
+              locked_reservation_id: lockedReservation.id,
+              locked_borrower_name: lockedReservation.borrower_name,
+              locked_borrower_phone: lockedReservation.borrower_phone,
+            },
+          })
+          return
+        }
+      } else {
+        const anyLocked = db.prepare(
+          "SELECT * FROM reservations WHERE equipment_id = ? AND status = 'locked' ORDER BY queue_order ASC LIMIT 1"
+        ).get(equipment_id) as { id: number; borrower_name: string; borrower_phone: string } | undefined
+
+        if (anyLocked) {
+          if (anyLocked.borrower_name !== borrower_name.trim() ||
+              anyLocked.borrower_phone !== borrower_phone.trim()) {
+            res.status(403).json({
+              success: false,
+              error: `该设备已锁定给预约人 ${anyLocked.borrower_name}(${anyLocked.borrower_phone})，仅限该预约人取件`,
+              conflict: { type: 'pickup_lock_mismatch', locked_reservation_id: anyLocked.id },
+            })
+            return
+          }
+        }
       }
     } else {
-      res.status(400).json({ success: false, error: '该设备处于预约状态但没有已通知的预约人，请刷新后重试' })
-      return
+      const anyLocked = db.prepare(
+        "SELECT * FROM reservations WHERE equipment_id = ? AND status = 'locked' ORDER BY queue_order ASC LIMIT 1"
+      ).get(equipment_id) as { id: number; borrower_name: string; borrower_phone: string } | undefined
+
+      if (anyLocked) {
+        if (anyLocked.borrower_name !== borrower_name.trim() ||
+            anyLocked.borrower_phone !== borrower_phone.trim()) {
+          res.status(403).json({
+            success: false,
+            error: `该设备已锁定给预约人 ${anyLocked.borrower_name}(${anyLocked.borrower_phone})，仅限该预约人取件`,
+            conflict: { type: 'pickup_lock_mismatch', locked_reservation_id: anyLocked.id },
+          })
+          return
+        }
+      } else {
+        res.status(400).json({ success: false, error: '该设备处于预约状态但没有锁定的预约人，请刷新后重试' })
+        return
+      }
     }
   }
 
   const operator = req.user!
 
-  const borrow = db.transaction(() => {
-    const recheck = db.prepare('SELECT status FROM equipments WHERE id = ?').get(equipment_id) as { status: string } | undefined
-    if (!recheck || (recheck.status !== 'available' && recheck.status !== 'reserved')) {
-      throw new Error('CONCURRENT_CHANGE')
-    }
+  let borrow
+  try {
+    borrow = db.transaction(() => {
+      const recheck = db.prepare('SELECT status, locked_reservation_id FROM equipments WHERE id = ?').get(equipment_id) as { status: string; locked_reservation_id: number | null } | undefined
+      if (!recheck || (recheck.status !== 'available' && recheck.status !== 'reserved')) {
+        throw new Error('CONCURRENT_CHANGE')
+      }
+
+      if (recheck.locked_reservation_id) {
+        const currentLocked = db.prepare('SELECT borrower_name, borrower_phone FROM reservations WHERE id = ? AND status = \'locked\'').get(recheck.locked_reservation_id) as { borrower_name: string; borrower_phone: string } | undefined
+        if (currentLocked && (currentLocked.borrower_name !== borrower_name.trim() || currentLocked.borrower_phone !== borrower_phone.trim())) {
+          throw new Error('LOCK_CONFLICT')
+        }
+      }
 
     const recordResult = db.prepare(
       `INSERT INTO borrow_records (equipment_id, borrower_name, borrower_phone, status, deposit_frozen)
@@ -78,7 +129,7 @@ router.post('/', authMiddleware, (req: Request, res: Response): void => {
     ).run(recordResult.lastInsertRowid, equipment_id, equipment.name, borrower_name, equipment.deposit_amount, operator.id, operator.username)
 
     db.prepare(
-      "UPDATE equipments SET status = 'borrowed', updated_at = datetime('now', 'localtime') WHERE id = ?"
+      `UPDATE equipments SET status = 'borrowed', locked_reservation_id = NULL, updated_at = datetime('now', 'localtime') WHERE id = ?`
     ).run(equipment_id)
 
     db.prepare(
@@ -86,15 +137,15 @@ router.post('/', authMiddleware, (req: Request, res: Response): void => {
        VALUES (?, ?, 'borrow', ?, ?, ?)`
     ).run(recordResult.lastInsertRowid, equipment_id, operator.id, operator.username,
       equipment.status === 'reserved'
-        ? `预约人 ${borrower_name} 取用预约设备 ${equipment.name}，冻结押金 ${equipment.deposit_amount}`
+        ? `锁定预约人 ${borrower_name} 取件设备 ${equipment.name}，冻结押金 ${equipment.deposit_amount}`
         : `借出设备 ${equipment.name} 给 ${borrower_name}，冻结押金 ${equipment.deposit_amount}`)
 
     const matchingReservation = db.prepare(
       `SELECT * FROM reservations 
        WHERE equipment_id = ? AND borrower_name = ? AND borrower_phone = ? 
-         AND status IN ('queued', 'notified')
+         AND status IN ('queued', 'notified', 'locked')
        ORDER BY queue_order ASC LIMIT 1`
-    ).get(equipment_id, borrower_name, borrower_phone) as { id: number; queue_order: number } | undefined
+    ).get(equipment_id, borrower_name, borrower_phone) as { id: number; queue_order: number; status: string } | undefined
 
     if (matchingReservation) {
       db.prepare(
@@ -104,7 +155,7 @@ router.post('/', authMiddleware, (req: Request, res: Response): void => {
 
       db.prepare(
         `UPDATE reservations SET queue_order = queue_order - 1 
-         WHERE equipment_id = ? AND status IN ('queued', 'notified') AND queue_order > ?`
+         WHERE equipment_id = ? AND status IN ('queued', 'notified', 'locked') AND queue_order > ?`
       ).run(equipment_id, matchingReservation.queue_order)
 
       db.prepare(
@@ -114,12 +165,31 @@ router.post('/', authMiddleware, (req: Request, res: Response): void => {
         equipment_id,
         operator.id,
         operator.username,
-        `借用人 ${borrower_name} 已实际借出设备 ${equipment.name}，自动完成对应预约`
+        `锁定预约人 ${borrower_name} 已实际取件设备 ${equipment.name}，自动完成对应预约`
       )
     }
 
     return db.prepare('SELECT * FROM borrow_records WHERE id = ?').get(recordResult.lastInsertRowid)
   })()
+  } catch (err: unknown) {
+    if (err instanceof Error && err.message === 'CONCURRENT_CHANGE') {
+      res.status(409).json({
+        success: false,
+        error: '设备状态在提交时已变更，请刷新后重试',
+        conflict: { type: 'equipment_status_changed' },
+      })
+      return
+    }
+    if (err instanceof Error && err.message === 'LOCK_CONFLICT') {
+      res.status(409).json({
+        success: false,
+        error: '该设备取件锁定在提交时已变更，请刷新后重试',
+        conflict: { type: 'pickup_lock_changed' },
+      })
+      return
+    }
+    throw err
+  }
 
   res.status(201).json({ success: true, data: borrow })
 })
@@ -166,54 +236,39 @@ router.put('/:id/return', authMiddleware, (req: Request, res: Response): void =>
        VALUES (?, ?, ?, ?, 'refund', ?, ?, ?)`
     ).run(id, record.equipment_id, equipment.name, record.borrower_name, refundAmount, operator.id, operator.username)
 
-    const nextReservation = db.prepare(
-      `SELECT * FROM reservations 
-       WHERE equipment_id = ? AND status = 'queued' 
-       ORDER BY queue_order ASC LIMIT 1`
-    ).get(record.equipment_id) as { id: number; borrower_name: string; borrower_phone: string } | undefined
-
     const hasActiveReservations = db.prepare(
-      "SELECT COUNT(*) as cnt FROM reservations WHERE equipment_id = ? AND status IN ('queued', 'notified')"
+      "SELECT COUNT(*) as cnt FROM reservations WHERE equipment_id = ? AND status IN ('queued', 'notified', 'locked')"
     ).get(record.equipment_id) as { cnt: number }
 
-    let notifiedReservation = null
-    if (nextReservation) {
-      db.prepare(
-        `UPDATE reservations SET status = 'notified', notified_at = datetime('now', 'localtime'),
-         version = version + 1, updated_at = datetime('now', 'localtime') WHERE id = ?`
-      ).run(nextReservation.id)
-
+    let lockedReservation = null
+    if (hasActiveReservations.cnt > 0) {
       db.prepare(
         "UPDATE equipments SET status = 'reserved', updated_at = datetime('now', 'localtime') WHERE id = ?"
       ).run(record.equipment_id)
 
-      db.prepare(
-        `INSERT INTO operation_logs (equipment_id, action, operator_id, operator_name, detail)
-         VALUES (?, 'reservation_auto_notify', ?, ?, ?)`
-      ).run(
-        record.equipment_id,
-        operator.id,
-        operator.username,
-        `设备 ${equipment.name} 已归还，自动通知下一位预约人 ${nextReservation.borrower_name}(${nextReservation.borrower_phone})，设备状态变为「已预约」`
-      )
+      autoLockNextIfNeeded(record.equipment_id, operator.id, operator.username, equipment.name)
 
-      notifiedReservation = db.prepare('SELECT * FROM reservations WHERE id = ?').get(nextReservation.id)
+      const equipAfter = db.prepare('SELECT locked_reservation_id FROM equipments WHERE id = ?').get(record.equipment_id) as { locked_reservation_id: number | null }
+      if (equipAfter.locked_reservation_id) {
+        lockedReservation = db.prepare('SELECT * FROM reservations WHERE id = ?').get(equipAfter.locked_reservation_id)
+      }
     } else {
       db.prepare(
-        "UPDATE equipments SET status = 'available', updated_at = datetime('now', 'localtime') WHERE id = ?"
+        "UPDATE equipments SET status = 'available', locked_reservation_id = NULL, updated_at = datetime('now', 'localtime') WHERE id = ?"
       ).run(record.equipment_id)
     }
 
     db.prepare(
       `INSERT INTO operation_logs (borrow_record_id, equipment_id, action, operator_id, operator_name, detail)
        VALUES (?, ?, 'return', ?, ?, ?)`
-    ).run(id, record.equipment_id, operator.id, operator.username, `归还设备 ${equipment.name}，退还押金 ${refundAmount}`)
+    ).run(id, record.equipment_id, operator.id, operator.username,
+      `归还设备 ${equipment.name}，退还押金 ${refundAmount}${lockedReservation ? `，已自动锁定下一位预约人` : ''}`)
 
     const borrowRecord = db.prepare('SELECT * FROM borrow_records WHERE id = ?').get(id)
-    return { borrowRecord, notifiedReservation }
+    return { borrowRecord, lockedReservation }
   })()
 
-  res.json({ success: true, data: updated.borrowRecord, next_reservation: updated.notifiedReservation })
+  res.json({ success: true, data: updated.borrowRecord, next_reservation: updated.lockedReservation })
 })
 
 router.put('/:id/damage', authMiddleware, (req: Request, res: Response): void => {

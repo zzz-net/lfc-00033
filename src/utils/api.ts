@@ -322,6 +322,15 @@ export const api = {
     return request<Reservation[]>(`/reservations${query ? `?${query}` : ""}`);
   },
 
+  lockReservation: (id: number) =>
+    request<Reservation>(`/reservations/${id}/lock`, { method: "PUT" }),
+
+  releaseLockReservation: (id: number, expected_version?: number) =>
+    request<Reservation>(`/reservations/${id}/release-lock`, {
+      method: "PUT",
+      body: JSON.stringify({ expected_version }),
+    }),
+
   notifyReservation: (id: number) =>
     request<Reservation>(`/reservations/${id}/notify`, { method: "PUT" }),
 

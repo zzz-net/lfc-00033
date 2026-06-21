@@ -4,11 +4,15 @@ import { authMiddleware, adminMiddleware } from '../middleware/auth.js'
 
 const router = Router()
 
+const PICKUP_LOCK_TIMEOUT_MINUTES = parseInt(process.env.PICKUP_LOCK_TIMEOUT_MINUTES || '30', 10)
+
 const RESERVATION_STATUS_LABELS: Record<string, string> = {
   queued: '排队中',
   notified: '已通知',
+  locked: '已锁定',
   completed: '已完成',
   cancelled: '已取消',
+  expired: '已超时',
 }
 
 function buildReservationConflictError(
@@ -31,47 +35,123 @@ function buildReservationConflictError(
   }
 }
 
+function resolveExpiredLocks(equipmentId: number, operatorId?: number, operatorName?: string): void {
+  const equipment = db.prepare('SELECT locked_reservation_id FROM equipments WHERE id = ?').get(equipmentId) as {
+    locked_reservation_id: number | null
+  } | undefined
+  if (!equipment || !equipment.locked_reservation_id) return
+
+  const locked = db.prepare('SELECT * FROM reservations WHERE id = ?').get(equipment.locked_reservation_id) as {
+    id: number
+    status: string
+    lock_expires_at: string | null
+    borrower_name: string
+    equipment_id: number
+  } | undefined
+
+  if (!locked || locked.status !== 'locked' || !locked.lock_expires_at) return
+
+  const now = new Date()
+  const expiresAt = new Date(locked.lock_expires_at + 'Z')
+  if (now < expiresAt) return
+
+  const equipName = (db.prepare('SELECT name FROM equipments WHERE id = ?').get(equipmentId) as { name: string }).name
+
+  db.transaction(() => {
+    db.prepare(
+      `UPDATE reservations SET status = 'expired', expired_at = datetime('now', 'localtime'),
+       version = version + 1, updated_at = datetime('now', 'localtime') WHERE id = ? AND status = 'locked'`
+    ).run(locked.id)
+
+    db.prepare(
+      `UPDATE reservations SET queue_order = queue_order - 1
+       WHERE equipment_id = ? AND status IN ('queued', 'notified') AND queue_order > (
+         SELECT queue_order FROM reservations WHERE id = ?
+       )`
+    ).run(equipmentId, locked.id)
+
+    db.prepare(
+      'UPDATE equipments SET locked_reservation_id = NULL, updated_at = datetime(\'now\', \'localtime\') WHERE id = ?'
+    ).run(equipmentId)
+
+    db.prepare(
+      `INSERT INTO operation_logs (equipment_id, action, operator_id, operator_name, detail)
+       VALUES (?, 'reservation_lock_expired', ?, ?, ?)`
+    ).run(
+      equipmentId,
+      operatorId || 1,
+      operatorName || 'system',
+      `预约人 ${locked.borrower_name} 对设备 ${equipName} 的取件锁定已超时失效`
+    )
+
+    autoLockNextIfNeeded(equipmentId, operatorId || 1, operatorName || 'system', equipName)
+  })()
+}
+
+function autoLockNextIfNeeded(equipmentId: number, operatorId: number, operatorName: string, equipmentName: string): void {
+  const nextInQueue = db.prepare(
+    "SELECT * FROM reservations WHERE equipment_id = ? AND status IN ('queued', 'notified') ORDER BY queue_order ASC LIMIT 1"
+  ).get(equipmentId) as {
+    id: number
+    borrower_name: string
+    borrower_phone: string
+    queue_order: number
+  } | undefined
+
+  if (!nextInQueue) {
+    const equip = db.prepare('SELECT status FROM equipments WHERE id = ?').get(equipmentId) as { status: string } | undefined
+    if (equip && equip.status === 'reserved') {
+      db.prepare(
+        "UPDATE equipments SET status = 'available', locked_reservation_id = NULL, updated_at = datetime('now', 'localtime') WHERE id = ?"
+      ).run(equipmentId)
+    }
+    return
+  }
+
+  const expiresAt = new Date(Date.now() + PICKUP_LOCK_TIMEOUT_MINUTES * 60 * 1000)
+  const expiresAtStr = expiresAt.toISOString().replace('Z', '').replace('T', ' ').substring(0, 19)
+
+  db.prepare(
+    `UPDATE reservations SET status = 'locked', locked_at = datetime('now', 'localtime'),
+     lock_expires_at = ?, notified_at = COALESCE(notified_at, datetime('now', 'localtime')),
+     version = version + 1, updated_at = datetime('now', 'localtime') WHERE id = ?`
+  ).run(expiresAtStr, nextInQueue.id)
+
+  db.prepare(
+    `UPDATE equipments SET status = 'reserved', locked_reservation_id = ?, updated_at = datetime('now', 'localtime') WHERE id = ?`
+  ).run(nextInQueue.id, equipmentId)
+
+  db.prepare(
+    `INSERT INTO operation_logs (equipment_id, action, operator_id, operator_name, detail)
+     VALUES (?, 'reservation_auto_lock', ?, ?, ?)`
+  ).run(
+    equipmentId,
+    operatorId,
+    operatorName,
+    `自动锁定下一位预约人 ${nextInQueue.borrower_name}(${nextInQueue.borrower_phone}) 为设备 ${equipmentName} 的唯一取件对象，超时时间 ${PICKUP_LOCK_TIMEOUT_MINUTES} 分钟`
+  )
+}
+
 function checkAndUpdateReservedEquipment(equipmentId: number): void {
   const activeCount = db.prepare(
-    "SELECT COUNT(*) as cnt FROM reservations WHERE equipment_id = ? AND status IN ('queued', 'notified')"
+    "SELECT COUNT(*) as cnt FROM reservations WHERE equipment_id = ? AND status IN ('queued', 'notified', 'locked')"
   ).get(equipmentId) as { cnt: number }
 
   const equipment = db.prepare('SELECT status FROM equipments WHERE id = ?').get(equipmentId) as { status: string } | undefined
   if (!equipment) return
 
   if (activeCount.cnt === 0 && equipment.status === 'reserved') {
-    db.prepare("UPDATE equipments SET status = 'available', updated_at = datetime('now', 'localtime') WHERE id = ?").run(equipmentId)
+    db.prepare(
+      "UPDATE equipments SET status = 'available', locked_reservation_id = NULL, updated_at = datetime('now', 'localtime') WHERE id = ?"
+    ).run(equipmentId)
   }
-}
-
-function autoNotifyNextIfNeeded(equipmentId: number, operatorId: number, operatorName: string, equipmentName: string): void {
-  const nextQueued = db.prepare(
-    "SELECT * FROM reservations WHERE equipment_id = ? AND status = 'queued' ORDER BY queue_order ASC LIMIT 1"
-  ).get(equipmentId) as { id: number; borrower_name: string; borrower_phone: string } | undefined
-
-  if (!nextQueued) return
-
-  db.prepare(
-    `UPDATE reservations SET status = 'notified', notified_at = datetime('now', 'localtime'),
-     version = version + 1, updated_at = datetime('now', 'localtime') WHERE id = ?`
-  ).run(nextQueued.id)
-
-  db.prepare(
-    `INSERT INTO operation_logs (equipment_id, action, operator_id, operator_name, detail)
-     VALUES (?, 'reservation_auto_notify', ?, ?, ?)`
-  ).run(
-    equipmentId,
-    operatorId,
-    operatorName,
-    `取消后自动通知下一位预约人 ${nextQueued.borrower_name}(${nextQueued.borrower_phone}) 取用设备 ${equipmentName}`
-  )
 }
 
 router.get('/', authMiddleware, (req: Request, res: Response): void => {
   const { status, equipment_id, borrower_name, equipment_name } = req.query
   const operator = req.user!
 
-  let sql = `SELECT r.*, e.name as equipment_name, e.type as equipment_type, e.status as equipment_status
+  let sql = `SELECT r.*, e.name as equipment_name, e.type as equipment_type, e.status as equipment_status, e.locked_reservation_id
     FROM reservations r
     JOIN equipments e ON r.equipment_id = e.id
     WHERE 1=1`
@@ -138,7 +218,7 @@ router.post('/', authMiddleware, (req: Request, res: Response): void => {
   const existing = db.prepare(
     `SELECT * FROM reservations 
      WHERE equipment_id = ? AND borrower_name = ? AND borrower_phone = ? 
-       AND status IN ('queued', 'notified')`
+       AND status IN ('queued', 'notified', 'locked')`
   ).get(equipment_id, borrower_name.trim(), borrower_phone.trim()) as { id: number } | undefined
 
   if (existing) {
@@ -155,7 +235,7 @@ router.post('/', authMiddleware, (req: Request, res: Response): void => {
       }
 
       const maxOrder = db.prepare(
-        "SELECT COALESCE(MAX(queue_order), -1) as max_order FROM reservations WHERE equipment_id = ? AND status IN ('queued', 'notified')"
+        "SELECT COALESCE(MAX(queue_order), -1) as max_order FROM reservations WHERE equipment_id = ? AND status IN ('queued', 'notified', 'locked')"
       ).get(equipment_id) as { max_order: number }
       const nextOrder = maxOrder.max_order + 1
 
@@ -255,6 +335,80 @@ router.put('/:id/notify', authMiddleware, (req: Request, res: Response): void =>
   res.json({ success: true, data: updated })
 })
 
+router.put('/:id/lock', authMiddleware, adminMiddleware, (req: Request, res: Response): void => {
+  const { id } = req.params
+  const operator = req.user!
+
+  const reservation = db.prepare('SELECT * FROM reservations WHERE id = ?').get(id) as {
+    id: number
+    equipment_id: number
+    borrower_name: string
+    borrower_phone: string
+    status: string
+    queue_order: number
+    version: number
+    updated_at: string
+  } | undefined
+
+  if (!reservation) {
+    res.status(404).json({ success: false, error: '预约记录不存在' })
+    return
+  }
+
+  if (reservation.status !== 'queued' && reservation.status !== 'notified') {
+    const statusLabel = RESERVATION_STATUS_LABELS[reservation.status] || reservation.status
+    res.status(400).json({ success: false, error: `当前预约状态为「${statusLabel}」，不可执行锁定操作` })
+    return
+  }
+
+  const equipment = db.prepare('SELECT * FROM equipments WHERE id = ?').get(reservation.equipment_id) as {
+    name: string
+    status: string
+    locked_reservation_id: number | null
+  }
+
+  resolveExpiredLocks(reservation.equipment_id, operator.id, operator.username)
+
+  if (equipment.status === 'reserved' && equipment.locked_reservation_id && equipment.locked_reservation_id !== reservation.id) {
+    const lockedResv = db.prepare('SELECT borrower_name FROM reservations WHERE id = ?').get(equipment.locked_reservation_id) as { borrower_name: string } | undefined
+    res.status(409).json({
+      success: false,
+      error: `该设备已锁定给预约人 ${lockedResv?.borrower_name || '他人'}，请先释放当前锁定`,
+      conflict: { type: 'equipment_already_locked', locked_reservation_id: equipment.locked_reservation_id },
+    })
+    return
+  }
+
+  const expiresAt = new Date(Date.now() + PICKUP_LOCK_TIMEOUT_MINUTES * 60 * 1000)
+  const expiresAtStr = expiresAt.toISOString().replace('Z', '').replace('T', ' ').substring(0, 19)
+
+  const updated = db.transaction(() => {
+    db.prepare(
+      `UPDATE reservations SET status = 'locked', locked_at = datetime('now', 'localtime'),
+       lock_expires_at = ?, notified_at = COALESCE(notified_at, datetime('now', 'localtime')),
+       version = version + 1, updated_at = datetime('now', 'localtime') WHERE id = ?`
+    ).run(expiresAtStr, id)
+
+    db.prepare(
+      `UPDATE equipments SET status = 'reserved', locked_reservation_id = ?, updated_at = datetime('now', 'localtime') WHERE id = ?`
+    ).run(reservation.id, reservation.equipment_id)
+
+    db.prepare(
+      `INSERT INTO operation_logs (equipment_id, action, operator_id, operator_name, detail)
+       VALUES (?, 'reservation_manual_lock', ?, ?, ?)`
+    ).run(
+      reservation.equipment_id,
+      operator.id,
+      operator.username,
+      `管理员手动锁定预约人 ${reservation.borrower_name}(${reservation.borrower_phone}) 为设备 ${equipment.name} 的唯一取件对象，超时时间 ${PICKUP_LOCK_TIMEOUT_MINUTES} 分钟`
+    )
+
+    return db.prepare('SELECT * FROM reservations WHERE id = ?').get(id)
+  })()
+
+  res.json({ success: true, data: updated })
+})
+
 router.put('/:id/complete', authMiddleware, (req: Request, res: Response): void => {
   const { id } = req.params
   const { expected_version } = req.body
@@ -269,6 +423,7 @@ router.put('/:id/complete', authMiddleware, (req: Request, res: Response): void 
     operator_name: string
     version: number
     updated_at: string
+    queue_order: number
   } | undefined
 
   if (!reservation) {
@@ -286,19 +441,30 @@ router.put('/:id/complete', authMiddleware, (req: Request, res: Response): void 
     return
   }
 
-  if (reservation.status !== 'queued' && reservation.status !== 'notified') {
+  if (reservation.status !== 'queued' && reservation.status !== 'notified' && reservation.status !== 'locked') {
     const statusLabel = RESERVATION_STATUS_LABELS[reservation.status] || reservation.status
     res.status(400).json({ success: false, error: `当前预约状态为「${statusLabel}」，不可执行完成操作` })
     return
   }
 
-  const equipment = db.prepare('SELECT name, status FROM equipments WHERE id = ?').get(reservation.equipment_id) as { name: string; status: string }
+  const equipment = db.prepare('SELECT name, status, locked_reservation_id FROM equipments WHERE id = ?').get(reservation.equipment_id) as { name: string; status: string; locked_reservation_id: number | null }
 
   const updated = db.transaction(() => {
     db.prepare(
       `UPDATE reservations SET status = 'completed', completed_at = datetime('now', 'localtime'),
        version = version + 1, updated_at = datetime('now', 'localtime') WHERE id = ?`
     ).run(id)
+
+    db.prepare(
+      `UPDATE reservations SET queue_order = queue_order - 1
+       WHERE equipment_id = ? AND status IN ('queued', 'notified', 'locked') AND queue_order > ?`
+    ).run(reservation.equipment_id, reservation.queue_order)
+
+    if (equipment.locked_reservation_id === reservation.id) {
+      db.prepare(
+        "UPDATE equipments SET locked_reservation_id = NULL, updated_at = datetime('now', 'localtime') WHERE id = ?"
+      ).run(reservation.equipment_id)
+    }
 
     db.prepare(
       `INSERT INTO operation_logs (equipment_id, action, operator_id, operator_name, detail)
@@ -311,7 +477,7 @@ router.put('/:id/complete', authMiddleware, (req: Request, res: Response): void 
     )
 
     if (equipment.status === 'reserved') {
-      autoNotifyNextIfNeeded(reservation.equipment_id, operator.id, operator.username, equipment.name)
+      autoLockNextIfNeeded(reservation.equipment_id, operator.id, operator.username, equipment.name)
       checkAndUpdateReservedEquipment(reservation.equipment_id)
     }
 
@@ -353,14 +519,14 @@ router.put('/:id/cancel', authMiddleware, (req: Request, res: Response): void =>
     return
   }
 
-  if (reservation.status === 'completed' || reservation.status === 'cancelled') {
+  if (reservation.status === 'completed' || reservation.status === 'cancelled' || reservation.status === 'expired') {
     const statusLabel = RESERVATION_STATUS_LABELS[reservation.status] || reservation.status
     res.status(400).json({ success: false, error: `当前预约状态为「${statusLabel}」，不可执行取消操作` })
     return
   }
 
-  const equipment = db.prepare('SELECT name, status FROM equipments WHERE id = ?').get(reservation.equipment_id) as { name: string; status: string }
-  const wasNotified = reservation.status === 'notified'
+  const equipment = db.prepare('SELECT name, status, locked_reservation_id FROM equipments WHERE id = ?').get(reservation.equipment_id) as { name: string; status: string; locked_reservation_id: number | null }
+  const wasLocked = reservation.status === 'locked'
 
   const updated = db.transaction(() => {
     db.prepare(
@@ -370,8 +536,14 @@ router.put('/:id/cancel', authMiddleware, (req: Request, res: Response): void =>
 
     db.prepare(
       `UPDATE reservations SET queue_order = queue_order - 1 
-       WHERE equipment_id = ? AND status IN ('queued', 'notified') AND queue_order > ?`
+       WHERE equipment_id = ? AND status IN ('queued', 'notified', 'locked') AND queue_order > ?`
     ).run(reservation.equipment_id, reservation.queue_order)
+
+    if (wasLocked && equipment.locked_reservation_id === reservation.id) {
+      db.prepare(
+        "UPDATE equipments SET locked_reservation_id = NULL, updated_at = datetime('now', 'localtime') WHERE id = ?"
+      ).run(reservation.equipment_id)
+    }
 
     db.prepare(
       `INSERT INTO operation_logs (equipment_id, action, operator_id, operator_name, detail)
@@ -380,11 +552,83 @@ router.put('/:id/cancel', authMiddleware, (req: Request, res: Response): void =>
       reservation.equipment_id,
       operator.id,
       operator.username,
-      `取消 ${reservation.borrower_name} 对设备 ${equipment.name} 的预约${cancel_reason ? `，原因：${cancel_reason}` : ''}`
+      `取消 ${reservation.borrower_name} 对设备 ${equipment.name} 的预约${wasLocked ? '（释放取件锁定）' : ''}${cancel_reason ? `，原因：${cancel_reason}` : ''}`
     )
 
-    if (equipment.status === 'reserved' && wasNotified) {
-      autoNotifyNextIfNeeded(reservation.equipment_id, operator.id, operator.username, equipment.name)
+    if (wasLocked && equipment.status === 'reserved') {
+      autoLockNextIfNeeded(reservation.equipment_id, operator.id, operator.username, equipment.name)
+    }
+
+    checkAndUpdateReservedEquipment(reservation.equipment_id)
+
+    return db.prepare('SELECT * FROM reservations WHERE id = ?').get(id)
+  })()
+
+  res.json({ success: true, data: updated })
+})
+
+router.put('/:id/release-lock', authMiddleware, adminMiddleware, (req: Request, res: Response): void => {
+  const { id } = req.params
+  const operator = req.user!
+
+  const reservation = db.prepare('SELECT * FROM reservations WHERE id = ?').get(id) as {
+    id: number
+    equipment_id: number
+    borrower_name: string
+    status: string
+    version: number
+    updated_at: string
+    queue_order: number
+  } | undefined
+
+  if (!reservation) {
+    res.status(404).json({ success: false, error: '预约记录不存在' })
+    return
+  }
+
+  if (reservation.status !== 'locked') {
+    const statusLabel = RESERVATION_STATUS_LABELS[reservation.status] || reservation.status
+    res.status(400).json({ success: false, error: `当前预约状态为「${statusLabel}」，不可执行释放锁定操作` })
+    return
+  }
+
+  const { expected_version } = req.body
+  if (expected_version !== undefined && Number(expected_version) !== reservation.version) {
+    res.status(409).json(buildReservationConflictError(reservation, Number(expected_version)))
+    return
+  }
+
+  const equipment = db.prepare('SELECT name, status, locked_reservation_id FROM equipments WHERE id = ?').get(reservation.equipment_id) as { name: string; status: string; locked_reservation_id: number | null }
+
+  const updated = db.transaction(() => {
+    db.prepare(
+      `UPDATE reservations SET status = 'cancelled', cancelled_at = datetime('now', 'localtime'),
+       cancel_reason = '管理员手动释放取件锁定', version = version + 1, updated_at = datetime('now', 'localtime') WHERE id = ?`
+    ).run(id)
+
+    db.prepare(
+      `UPDATE reservations SET queue_order = queue_order - 1
+       WHERE equipment_id = ? AND status IN ('queued', 'notified', 'locked') AND queue_order > ?`
+    ).run(reservation.equipment_id, reservation.queue_order)
+
+    if (equipment.locked_reservation_id === reservation.id) {
+      db.prepare(
+        "UPDATE equipments SET locked_reservation_id = NULL, updated_at = datetime('now', 'localtime') WHERE id = ?"
+      ).run(reservation.equipment_id)
+    }
+
+    db.prepare(
+      `INSERT INTO operation_logs (equipment_id, action, operator_id, operator_name, detail)
+       VALUES (?, 'reservation_release_lock', ?, ?, ?)`
+    ).run(
+      reservation.equipment_id,
+      operator.id,
+      operator.username,
+      `管理员手动释放预约人 ${reservation.borrower_name} 对设备 ${equipment.name} 的取件锁定`
+    )
+
+    if (equipment.status === 'reserved') {
+      autoLockNextIfNeeded(reservation.equipment_id, operator.id, operator.username, equipment.name)
     }
 
     checkAndUpdateReservedEquipment(reservation.equipment_id)
@@ -414,7 +658,7 @@ router.put('/reorder', authMiddleware, adminMiddleware, (req: Request, res: Resp
     for (const { id, queue_order } of orders) {
       db.prepare(
         `UPDATE reservations SET queue_order = ?, version = version + 1, updated_at = datetime('now', 'localtime') 
-         WHERE id = ? AND status IN ('queued', 'notified')`
+         WHERE id = ? AND status IN ('queued', 'notified', 'locked')`
       ).run(queue_order, id)
     }
 
@@ -431,7 +675,7 @@ router.put('/reorder', authMiddleware, adminMiddleware, (req: Request, res: Resp
     return db.prepare(
       `SELECT r.*, e.name as equipment_name FROM reservations r 
        JOIN equipments e ON r.equipment_id = e.id 
-       WHERE r.equipment_id = ? AND r.status IN ('queued', 'notified') 
+       WHERE r.equipment_id = ? AND r.status IN ('queued', 'notified', 'locked') 
        ORDER BY r.queue_order ASC`
     ).all(equipment_id)
   })()
@@ -440,3 +684,4 @@ router.put('/reorder', authMiddleware, adminMiddleware, (req: Request, res: Resp
 })
 
 export default router
+export { resolveExpiredLocks, autoLockNextIfNeeded, PICKUP_LOCK_TIMEOUT_MINUTES }

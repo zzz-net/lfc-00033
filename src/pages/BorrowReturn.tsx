@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
-import { X, Download, Plus, User, Phone, Clock, StickyNote, Bell, CheckCircle2, XCircle, ArrowUp, ArrowDown, ListTodo, AlertTriangle } from "lucide-react";
+import { X, Download, Plus, User, Phone, Clock, StickyNote, Bell, CheckCircle2, XCircle, ArrowUp, ArrowDown, ListTodo, AlertTriangle, Lock, Unlock } from "lucide-react";
 import { api } from "@/utils/api";
 import { useAuthStore } from "@/store/authStore";
 import { toast } from "@/components/Toast";
@@ -7,7 +7,7 @@ import { formatAmount, formatDate, EQUIPMENT_STATUS_LABELS, EQUIPMENT_STATUS_COL
 import { useLocalStorage } from "@/hooks/useLocalStorage";
 import type { Equipment, BorrowRecord, Reservation } from "@/types";
 
-type EquipmentWithNotified = Equipment & { notifiedReservation: Reservation | null };
+type EquipmentWithLocked = Equipment & { lockedReservation: Reservation | null };
 
 type TabKey = "borrow" | "return" | "damage" | "reservations";
 
@@ -123,18 +123,18 @@ export default function BorrowReturnPage() {
     refreshAll();
   }, [refreshAll]);
 
-  const borrowableEquipments: EquipmentWithNotified[] = useMemo(() => {
-    const availWithNotified = availableEquipments.map((eq) => ({
+  const borrowableEquipments: EquipmentWithLocked[] = useMemo(() => {
+    const availWithLocked = availableEquipments.map((eq) => ({
       ...eq,
-      notifiedReservation: null as Reservation | null,
+      lockedReservation: null as Reservation | null,
     }));
-    const reservedWithNotified = reservedEquipments.map((eq) => {
-      const notified = reservations.find(
-        (r) => r.equipment_id === eq.id && r.status === "notified"
+    const reservedWithLocked = reservedEquipments.map((eq) => {
+      const locked = reservations.find(
+        (r) => r.equipment_id === eq.id && r.status === "locked"
       );
-      return { ...eq, notifiedReservation: notified || null };
+      return { ...eq, lockedReservation: locked || null };
     });
-    return [...availWithNotified, ...reservedWithNotified].sort((a, b) =>
+    return [...availWithLocked, ...reservedWithLocked].sort((a, b) =>
       a.name.localeCompare(b.name)
     );
   }, [availableEquipments, reservedEquipments, reservations]);
@@ -145,11 +145,11 @@ export default function BorrowReturnPage() {
 
   const handleBorrowFormEquipmentChange = (equipmentId: number) => {
     const eq = borrowableEquipments.find((e) => e.id === equipmentId);
-    if (eq && eq.status === "reserved" && eq.notifiedReservation) {
+    if (eq && eq.status === "reserved" && eq.lockedReservation) {
       setBorrowForm({
         equipment_id: equipmentId,
-        borrower_name: eq.notifiedReservation.borrower_name,
-        borrower_phone: eq.notifiedReservation.borrower_phone,
+        borrower_name: eq.lockedReservation.borrower_name,
+        borrower_phone: eq.lockedReservation.borrower_phone,
       });
     } else {
       setBorrowForm({ ...borrowForm, equipment_id: equipmentId });
@@ -314,9 +314,41 @@ export default function BorrowReturnPage() {
     }
   };
 
+  const handleLockReservation = async (r: Reservation) => {
+    try {
+      await api.lockReservation(r.id);
+      toast("已锁定预约人为唯一取件对象", "success");
+      fetchReservations();
+      fetchReservedEquipments();
+    } catch (err: any) {
+      if (err?.conflict) {
+        toast("锁定冲突，设备已锁定给其他预约人，请刷新", "error");
+      } else {
+        toast(err instanceof Error ? err.message : "锁定失败", "error");
+      }
+      refreshAll();
+    }
+  };
+
+  const handleReleaseLock = async (r: Reservation) => {
+    if (!confirm(`确认释放 ${r.borrower_name} 的取件锁定？释放后将自动锁定下一位预约人。`)) return;
+    try {
+      await api.releaseLockReservation(r.id, r.version);
+      toast("已释放取件锁定", "success");
+      refreshAll();
+    } catch (err: any) {
+      if (err?.conflict) {
+        toast("该预约已被其他操作更新，请刷新后重试", "error");
+      } else {
+        toast(err instanceof Error ? err.message : "释放失败", "error");
+      }
+      refreshAll();
+    }
+  };
+
   const handleMoveReservation = async (r: Reservation, direction: -1 | 1) => {
     const sameEquipReservations = reservations.filter(
-      (x) => x.equipment_id === r.equipment_id && (x.status === "queued" || x.status === "notified")
+      (x) => x.equipment_id === r.equipment_id && (x.status === "queued" || x.status === "notified" || x.status === "locked")
     ).sort((a, b) => a.queue_order - b.queue_order);
 
     const idx = sameEquipReservations.findIndex((x) => x.id === r.id);
@@ -430,14 +462,14 @@ export default function BorrowReturnPage() {
                     </optgroup>
                   )}
                   {reservedEquipments.length > 0 && (
-                    <optgroup label="已预约 - 待取用">
+                    <optgroup label="已锁定 - 待取件">
                       {reservedEquipments.map((eq) => {
-                        const notified = reservations.find(
-                          (r) => r.equipment_id === eq.id && r.status === "notified"
+                        const locked = reservations.find(
+                          (r) => r.equipment_id === eq.id && r.status === "locked"
                         );
                         return (
                           <option key={eq.id} value={eq.id}>
-                            {eq.name}（{eq.type}）→ {notified ? `${notified.borrower_name}` : "待通知"}
+                            {eq.name}（{eq.type}）→ {locked ? `${locked.borrower_name} 🔒` : "待锁定"}
                           </option>
                         );
                       })}
@@ -461,10 +493,17 @@ export default function BorrowReturnPage() {
                       </span>
                     )}
                   </div>
-                  {selectedEquip.status === "reserved" && selectedEquip.notifiedReservation && (
-                    <div className="mt-2 text-xs text-purple-600">
-                      <AlertTriangle className="w-3 h-3 inline mr-1" />
-                      该设备已预约给 {selectedEquip.notifiedReservation.borrower_name}，借用人信息已自动填入
+                  {selectedEquip.status === "reserved" && selectedEquip.lockedReservation && (
+                    <div className="mt-2 space-y-1">
+                      <div className="text-xs text-purple-600 flex items-center gap-1">
+                        <Lock className="w-3 h-3" />
+                        该设备已锁定给 {selectedEquip.lockedReservation.borrower_name}，仅限该预约人取件
+                      </div>
+                      {selectedEquip.lockedReservation.lock_expires_at && (
+                        <div className="text-xs text-purple-500">
+                          取件锁定超时：{formatDate(selectedEquip.lockedReservation.lock_expires_at)}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -478,7 +517,8 @@ export default function BorrowReturnPage() {
                   onChange={(e) =>
                     setBorrowForm({ ...borrowForm, borrower_name: e.target.value })
                   }
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                  readOnly={selectedEquip?.status === "reserved" && !!selectedEquip?.lockedReservation}
+                  className={`w-full px-3 py-2 border border-gray-300 rounded-lg text-sm ${selectedEquip?.status === "reserved" && selectedEquip?.lockedReservation ? "bg-gray-100 cursor-not-allowed" : ""}`}
                   placeholder="请输入姓名"
                 />
               </div>
@@ -491,7 +531,8 @@ export default function BorrowReturnPage() {
                   onChange={(e) =>
                     setBorrowForm({ ...borrowForm, borrower_phone: e.target.value })
                   }
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                  readOnly={selectedEquip?.status === "reserved" && !!selectedEquip?.lockedReservation}
+                  className={`w-full px-3 py-2 border border-gray-300 rounded-lg text-sm ${selectedEquip?.status === "reserved" && selectedEquip?.lockedReservation ? "bg-gray-100 cursor-not-allowed" : ""}`}
                   placeholder="请输入电话"
                 />
               </div>
@@ -513,7 +554,7 @@ export default function BorrowReturnPage() {
               ) : (
                 borrowedRecords.map((r, idx) => {
                   const pendingReservations = reservations.filter(
-                    (rv) => rv.equipment_id === r.equipment_id && (rv.status === "queued" || rv.status === "notified")
+                    (rv) => rv.equipment_id === r.equipment_id && (rv.status === "queued" || rv.status === "notified" || rv.status === "locked")
                   );
                   return (
                     <div
@@ -535,8 +576,8 @@ export default function BorrowReturnPage() {
                           </div>
                           {pendingReservations.length > 0 && (
                             <div className="text-xs text-purple-600 mt-1">
-                              <AlertTriangle className="w-3 h-3 inline mr-0.5" />
-                              归还后将自动通知 {pendingReservations.length} 位排队预约人，设备将变为「已预约」状态
+                              <Lock className="w-3 h-3 inline mr-0.5" />
+                              归还后将自动锁定下一位预约人为唯一取件对象，设备将变为「已预约/已锁定」状态
                             </div>
                           )}
                         </div>
@@ -665,7 +706,7 @@ export default function BorrowReturnPage() {
                             .sort((a, b) => a.name.localeCompare(b.name))
                             .map((eq) => {
                               const activeCount = reservations.filter(
-                                (r) => r.equipment_id === eq.id && (r.status === "queued" || r.status === "notified")
+                                (r) => r.equipment_id === eq.id && (r.status === "queued" || r.status === "notified" || r.status === "locked")
                               ).length;
                               return (
                                 <option key={eq.id} value={eq.id}>
@@ -758,8 +799,8 @@ export default function BorrowReturnPage() {
                 <p className="text-center text-gray-400 py-12">暂无预约记录</p>
               ) : (
                 groupedReservations.map((group) => {
-                  const activeItems = group.items.filter((r) => r.status === "queued" || r.status === "notified");
-                  const historyItems = group.items.filter((r) => r.status === "completed" || r.status === "cancelled");
+                  const activeItems = group.items.filter((r) => r.status === "queued" || r.status === "notified" || r.status === "locked");
+                  const historyItems = group.items.filter((r) => r.status === "completed" || r.status === "cancelled" || r.status === "expired");
                   const equipStatus = group.equipment.status;
                   return (
                     <div key={group.equipment_id} className="border border-gray-200 rounded-lg overflow-hidden">
@@ -804,6 +845,12 @@ export default function BorrowReturnPage() {
                                     <StickyNote className="w-3 h-3 inline mr-0.5" />{r.notes}
                                   </div>
                                 )}
+                                {r.status === "locked" && r.lock_expires_at && (
+                                  <div className="text-xs text-purple-500 flex items-center gap-0.5">
+                                    <Lock className="w-3 h-3" />
+                                    取件锁定超时：{formatDate(r.lock_expires_at)}
+                                  </div>
+                                )}
                                 <div className="text-xs text-gray-400">
                                   登记人：{r.operator_name} · {formatDate(r.created_at)}
                                 </div>
@@ -839,7 +886,34 @@ export default function BorrowReturnPage() {
                                       <Bell className="w-4 h-4" />
                                     </button>
                                   )}
-                                  {(r.status === "queued" || r.status === "notified") && (isAdmin || r.operator_id === user?.id) && (
+                                  {r.status === "queued" && isAdmin && (
+                                    <button
+                                      onClick={() => handleLockReservation(r)}
+                                      className="p-1 text-purple-600 hover:text-purple-800"
+                                      title="锁定为取件人"
+                                    >
+                                      <Lock className="w-4 h-4" />
+                                    </button>
+                                  )}
+                                  {r.status === "notified" && isAdmin && (
+                                    <button
+                                      onClick={() => handleLockReservation(r)}
+                                      className="p-1 text-purple-600 hover:text-purple-800"
+                                      title="升级为取件锁定"
+                                    >
+                                      <Lock className="w-4 h-4" />
+                                    </button>
+                                  )}
+                                  {r.status === "locked" && isAdmin && (
+                                    <button
+                                      onClick={() => handleReleaseLock(r)}
+                                      className="p-1 text-orange-500 hover:text-orange-700"
+                                      title="释放锁定"
+                                    >
+                                      <Unlock className="w-4 h-4" />
+                                    </button>
+                                  )}
+                                  {(r.status === "queued" || r.status === "notified" || r.status === "locked") && (isAdmin || r.operator_id === user?.id) && (
                                     <>
                                       <button
                                         onClick={() => handleCompleteReservation(r)}
@@ -895,11 +969,11 @@ export default function BorrowReturnPage() {
 
       {nextReservationAlert && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4 border-2 border-blue-200">
-            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100 bg-blue-50">
-              <h2 className="text-lg font-semibold text-blue-900 flex items-center gap-2">
-                <Bell className="w-5 h-5" />
-                下一位预约人已自动通知
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4 border-2 border-purple-300">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100 bg-purple-50">
+              <h2 className="text-lg font-semibold text-purple-900 flex items-center gap-2">
+                <Lock className="w-5 h-5" />
+                下一位预约人已自动锁定
               </h2>
               <button
                 onClick={() => setNextReservationAlert(null)}
@@ -909,7 +983,7 @@ export default function BorrowReturnPage() {
               </button>
             </div>
             <div className="px-6 py-5 space-y-3">
-              <div className="p-3 bg-blue-50/50 rounded-lg border border-blue-100 space-y-1.5">
+              <div className="p-3 bg-purple-50/50 rounded-lg border border-purple-100 space-y-1.5">
                 <div className="text-sm">
                   <span className="text-gray-500">借用人：</span>
                   <span className="font-medium text-gray-900">{nextReservationAlert.borrower_name}</span>
@@ -920,8 +994,14 @@ export default function BorrowReturnPage() {
                 </div>
                 <div className="text-sm">
                   <span className="text-gray-500">排队顺位：</span>
-                  <span className="font-medium text-blue-700">#{nextReservationAlert.queue_order + 1}</span>
+                  <span className="font-medium text-purple-700">#{nextReservationAlert.queue_order + 1}</span>
                 </div>
+                {nextReservationAlert.lock_expires_at && (
+                  <div className="text-sm">
+                    <span className="text-gray-500">锁定超时：</span>
+                    <span className="font-medium text-purple-700">{formatDate(nextReservationAlert.lock_expires_at)}</span>
+                  </div>
+                )}
                 {nextReservationAlert.notes && (
                   <div className="text-sm">
                     <span className="text-gray-500">备注：</span>
@@ -930,7 +1010,7 @@ export default function BorrowReturnPage() {
                 )}
               </div>
               <p className="text-xs text-gray-500">
-                请及时联系预约人确认取件时间。预约状态已自动切换为「已通知」，设备状态变为「已预约」。
+                该预约人已被正式锁定为唯一取件对象，仅限该预约人取件，管理员也不可越权借出。如超时未取件，锁定将自动释放并锁定下一位。
               </p>
             </div>
             <div className="px-6 py-3 border-t border-gray-100 flex justify-end">
