@@ -1,18 +1,19 @@
-import { useState, useEffect, useCallback } from "react";
-import { X, Download } from "lucide-react";
+import { useState, useEffect, useCallback, useMemo } from "react";
+import { X, Download, Plus, User, Phone, Clock, StickyNote, Bell, CheckCircle2, XCircle, ArrowUp, ArrowDown, ListTodo } from "lucide-react";
 import { api } from "@/utils/api";
 import { useAuthStore } from "@/store/authStore";
 import { toast } from "@/components/Toast";
-import { formatAmount, formatDate, EQUIPMENT_STATUS_LABELS, EQUIPMENT_STATUS_COLORS } from "@/utils/helpers";
+import { formatAmount, formatDate, EQUIPMENT_STATUS_LABELS, EQUIPMENT_STATUS_COLORS, RESERVATION_STATUS_LABELS, RESERVATION_STATUS_COLORS } from "@/utils/helpers";
 import { useLocalStorage } from "@/hooks/useLocalStorage";
-import type { Equipment, BorrowRecord } from "@/types";
+import type { Equipment, BorrowRecord, Reservation } from "@/types";
 
-type TabKey = "borrow" | "return" | "damage";
+type TabKey = "borrow" | "return" | "damage" | "reservations";
 
-const TABS: { key: TabKey; label: string }[] = [
-  { key: "borrow", label: "借出" },
-  { key: "return", label: "归还" },
-  { key: "damage", label: "损坏登记" },
+const TABS: { key: TabKey; label: string; icon: typeof ListTodo }[] = [
+  { key: "borrow", label: "借出", icon: ListTodo },
+  { key: "return", label: "归还", icon: ListTodo },
+  { key: "damage", label: "损坏登记", icon: ListTodo },
+  { key: "reservations", label: "预约排队", icon: ListTodo },
 ];
 
 export default function BorrowReturnPage() {
@@ -22,8 +23,12 @@ export default function BorrowReturnPage() {
   const [activeTab, setActiveTab] = useLocalStorage<TabKey>("borrow_return_tab", "borrow");
 
   const [availableEquipments, setAvailableEquipments] = useState<Equipment[]>([]);
+  const [borrowedEquipments, setBorrowedEquipments] = useState<Equipment[]>([]);
   const [borrowedRecords, setBorrowedRecords] = useState<BorrowRecord[]>([]);
   const [pendingRecords, setPendingRecords] = useState<BorrowRecord[]>([]);
+  const [reservations, setReservations] = useState<Reservation[]>([]);
+
+  const [nextReservationAlert, setNextReservationAlert] = useState<Reservation | null>(null);
 
   const [borrowForm, setBorrowForm] = useState({
     equipment_id: 0,
@@ -31,6 +36,16 @@ export default function BorrowReturnPage() {
     borrower_phone: "",
   });
   const [submitting, setSubmitting] = useState(false);
+
+  const [showReservationForm, setShowReservationForm] = useState(false);
+  const [reservationForm, setReservationForm] = useState({
+    equipment_id: 0,
+    borrower_name: "",
+    borrower_phone: "",
+    expected_pickup_time: "",
+    notes: "",
+  });
+  const [reservationSubmitting, setReservationSubmitting] = useState(false);
 
   const [damageDialog, setDamageDialog] = useState<BorrowRecord | null>(null);
   const [damageDesc, setDamageDesc] = useState("");
@@ -42,6 +57,15 @@ export default function BorrowReturnPage() {
     try {
       const res = await api.getEquipments({ status: "available" });
       setAvailableEquipments(res.data);
+    } catch (err: unknown) {
+      toast(err instanceof Error ? err.message : "加载失败", "error");
+    }
+  }, []);
+
+  const fetchBorrowedEquipments = useCallback(async () => {
+    try {
+      const res = await api.getEquipments({ status: "borrowed" });
+      setBorrowedEquipments(res.data);
     } catch (err: unknown) {
       toast(err instanceof Error ? err.message : "加载失败", "error");
     }
@@ -65,11 +89,26 @@ export default function BorrowReturnPage() {
     }
   }, []);
 
-  useEffect(() => {
+  const fetchReservations = useCallback(async () => {
+    try {
+      const data = await api.getReservations();
+      setReservations(data);
+    } catch (err: unknown) {
+      toast(err instanceof Error ? err.message : "加载失败", "error");
+    }
+  }, []);
+
+  const refreshAll = useCallback(() => {
     fetchAvailable();
+    fetchBorrowedEquipments();
     fetchBorrowed();
     fetchPending();
-  }, [fetchAvailable, fetchBorrowed, fetchPending]);
+    fetchReservations();
+  }, [fetchAvailable, fetchBorrowedEquipments, fetchBorrowed, fetchPending, fetchReservations]);
+
+  useEffect(() => {
+    refreshAll();
+  }, [refreshAll]);
 
   const selectedEquip = availableEquipments.find(
     (e) => e.id === borrowForm.equipment_id
@@ -93,8 +132,7 @@ export default function BorrowReturnPage() {
       await api.createBorrow(borrowForm);
       toast("借出成功", "success");
       setBorrowForm({ equipment_id: 0, borrower_name: "", borrower_phone: "" });
-      fetchAvailable();
-      fetchBorrowed();
+      refreshAll();
     } catch (err: unknown) {
       toast(err instanceof Error ? err.message : "借出失败", "error");
     } finally {
@@ -104,10 +142,12 @@ export default function BorrowReturnPage() {
 
   const handleReturn = async (id: number) => {
     try {
-      await api.returnBorrow(id);
+      const res = await api.returnBorrow(id);
       toast("归还成功", "success");
-      fetchBorrowed();
-      fetchAvailable();
+      if (res?.next_reservation) {
+        setNextReservationAlert(res.next_reservation);
+      }
+      refreshAll();
     } catch (err: unknown) {
       toast(err instanceof Error ? err.message : "归还失败", "error");
     }
@@ -124,8 +164,7 @@ export default function BorrowReturnPage() {
       toast("损坏登记成功", "success");
       setDamageDialog(null);
       setDamageDesc("");
-      fetchBorrowed();
-      fetchPending();
+      refreshAll();
     } catch (err: unknown) {
       toast(err instanceof Error ? err.message : "登记失败", "error");
     }
@@ -143,30 +182,154 @@ export default function BorrowReturnPage() {
       toast("确认损坏成功", "success");
       setConfirmDialog(null);
       setConfirmDeducted("");
-      fetchPending();
-      fetchAvailable();
+      refreshAll();
     } catch (err: unknown) {
       toast(err instanceof Error ? err.message : "确认失败", "error");
     }
   };
 
+  const handleCreateReservation = async () => {
+    if (!reservationForm.equipment_id) {
+      toast("请选择设备", "error");
+      return;
+    }
+    if (!reservationForm.borrower_name.trim()) {
+      toast("请输入借用人姓名", "error");
+      return;
+    }
+    if (!reservationForm.borrower_phone.trim()) {
+      toast("请输入借用人电话", "error");
+      return;
+    }
+    setReservationSubmitting(true);
+    try {
+      await api.createReservation({
+        equipment_id: reservationForm.equipment_id,
+        borrower_name: reservationForm.borrower_name.trim(),
+        borrower_phone: reservationForm.borrower_phone.trim(),
+        expected_pickup_time: reservationForm.expected_pickup_time || undefined,
+        notes: reservationForm.notes || undefined,
+      });
+      toast("预约登记成功", "success");
+      setShowReservationForm(false);
+      setReservationForm({ equipment_id: 0, borrower_name: "", borrower_phone: "", expected_pickup_time: "", notes: "" });
+      refreshAll();
+    } catch (err: unknown) {
+      toast(err instanceof Error ? err.message : "预约登记失败", "error");
+    } finally {
+      setReservationSubmitting(false);
+    }
+  };
+
+  const handleNotifyReservation = async (r: Reservation) => {
+    try {
+      await api.notifyReservation(r.id);
+      toast("已通知预约人", "success");
+      fetchReservations();
+    } catch (err: unknown) {
+      toast(err instanceof Error ? err.message : "通知失败", "error");
+    }
+  };
+
+  const handleCompleteReservation = async (r: Reservation) => {
+    try {
+      await api.completeReservation(r.id, r.version);
+      toast("预约已完成", "success");
+      fetchReservations();
+    } catch (err: any) {
+      if (err?.conflict) {
+        toast("该预约已被其他操作更新，请刷新后重试", "error");
+      } else {
+        toast(err instanceof Error ? err.message : "操作失败", "error");
+      }
+      fetchReservations();
+    }
+  };
+
+  const handleCancelReservation = async (r: Reservation) => {
+    const reason = prompt("请输入取消原因（可选）：") || "";
+    try {
+      await api.cancelReservation(r.id, reason, r.version);
+      toast("预约已取消", "success");
+      fetchReservations();
+    } catch (err: any) {
+      if (err?.conflict) {
+        toast("该预约已被其他操作更新，请刷新后重试", "error");
+      } else {
+        toast(err instanceof Error ? err.message : "取消失败", "error");
+      }
+      fetchReservations();
+    }
+  };
+
+  const handleMoveReservation = async (r: Reservation, direction: -1 | 1) => {
+    const sameEquipReservations = reservations.filter(
+      (x) => x.equipment_id === r.equipment_id && (x.status === "queued" || x.status === "notified")
+    ).sort((a, b) => a.queue_order - b.queue_order);
+
+    const idx = sameEquipReservations.findIndex((x) => x.id === r.id);
+    if (idx < 0) return;
+    const newIdx = idx + direction;
+    if (newIdx < 0 || newIdx >= sameEquipReservations.length) return;
+
+    const orders = sameEquipReservations.map((x, i) => {
+      if (x.id === r.id) return { id: x.id, queue_order: newIdx };
+      if (i === newIdx) return { id: x.id, queue_order: idx };
+      return { id: x.id, queue_order: i };
+    });
+
+    try {
+      await api.reorderReservations(r.equipment_id, orders);
+      toast("排队顺序已调整", "success");
+      fetchReservations();
+    } catch (err: unknown) {
+      toast(err instanceof Error ? err.message : "调整失败", "error");
+    }
+  };
+
   const handleExport = async () => {
     try {
-      let status = "";
-      if (activeTab === "return") status = "borrowed";
-      else if (activeTab === "damage") status = "pending_confirm";
-      await api.exportBorrows({ status: status || undefined });
+      if (activeTab === "reservations") {
+        await api.exportReservations();
+      } else {
+        let status = "";
+        if (activeTab === "return") status = "borrowed";
+        else if (activeTab === "damage") status = "pending_confirm";
+        await api.exportBorrows({ status: status || undefined });
+      }
       toast("导出成功", "success");
     } catch (err: unknown) {
       toast(err instanceof Error ? err.message : "导出失败", "error");
     }
   };
 
+  const groupedReservations = useMemo(() => {
+    const map = new Map<number, { equipment: { id: number; name: string; type: string } | null; items: Reservation[] }>();
+    for (const r of reservations) {
+      if (!map.has(r.equipment_id)) {
+        map.set(r.equipment_id, { equipment: null, items: [] });
+      }
+      map.get(r.equipment_id)!.items.push(r);
+    }
+    for (const e of [...availableEquipments, ...borrowedEquipments]) {
+      if (map.has(e.id)) {
+        map.get(e.id)!.equipment = { id: e.id, name: e.name, type: e.type };
+      }
+    }
+    return Array.from(map.entries())
+      .map(([id, v]) => ({
+        equipment_id: id,
+        equipment: v.equipment || { id, name: `设备#${id}`, type: "" },
+        items: v.items.sort((a, b) => a.queue_order - b.queue_order),
+      }))
+      .sort((a, b) => a.equipment.name.localeCompare(b.equipment.name));
+  }, [reservations, availableEquipments, borrowedEquipments]);
+
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-2">
         <h1 className="text-xl font-bold text-gray-900">借还操作</h1>
-        {isAdmin && (activeTab === "return" || activeTab === "damage") && (
+        {isAdmin && (activeTab === "return" || activeTab === "damage" || activeTab === "reservations") && (
           <button
             onClick={handleExport}
             className="btn-outline flex items-center gap-1.5 text-sm"
@@ -178,7 +341,7 @@ export default function BorrowReturnPage() {
       </div>
 
       <div className="bg-white rounded-xl shadow-sm border border-gray-100">
-        <div className="flex border-b border-gray-100">
+        <div className="flex border-b border-gray-100 flex-wrap">
           {TABS.map((tab) => (
             <button
               key={tab.key}
@@ -365,8 +528,305 @@ export default function BorrowReturnPage() {
               )}
             </div>
           )}
+
+          {activeTab === "reservations" && (
+            <div className="space-y-5">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-semibold text-gray-700">预约排队列表</h3>
+                <button
+                  onClick={() => {
+                    setShowReservationForm(!showReservationForm);
+                    setReservationForm({ equipment_id: 0, borrower_name: "", borrower_phone: "", expected_pickup_time: "", notes: "" });
+                  }}
+                  className="btn-primary text-sm flex items-center gap-1"
+                >
+                  <Plus className="w-4 h-4" />
+                  新增预约
+                </button>
+              </div>
+
+              {showReservationForm && (
+                <div className="bg-gray-50 rounded-lg p-4 border border-gray-200 space-y-3 max-w-2xl">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">选择设备</label>
+                    <select
+                      value={reservationForm.equipment_id}
+                      onChange={(e) =>
+                        setReservationForm({ ...reservationForm, equipment_id: Number(e.target.value) })
+                      }
+                      className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm bg-white"
+                    >
+                      <option value={0}>请选择设备（可选择已借出的设备进行预约）</option>
+                      {[...availableEquipments, ...borrowedEquipments]
+                        .sort((a, b) => a.name.localeCompare(b.name))
+                        .map((eq) => (
+                          <option key={eq.id} value={eq.id}>
+                            {eq.name}（{eq.type}）- {EQUIPMENT_STATUS_LABELS[eq.status]}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">
+                        <User className="w-3 h-3 inline mr-1" />借用人姓名
+                      </label>
+                      <input
+                        type="text"
+                        value={reservationForm.borrower_name}
+                        onChange={(e) =>
+                          setReservationForm({ ...reservationForm, borrower_name: e.target.value })
+                        }
+                        className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm"
+                        placeholder="请输入姓名"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">
+                        <Phone className="w-3 h-3 inline mr-1" />借用人电话
+                      </label>
+                      <input
+                        type="text"
+                        value={reservationForm.borrower_phone}
+                        onChange={(e) =>
+                          setReservationForm({ ...reservationForm, borrower_phone: e.target.value })
+                        }
+                        className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm"
+                        placeholder="请输入电话"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">
+                      <Clock className="w-3 h-3 inline mr-1" />预计取用时间
+                    </label>
+                    <input
+                      type="datetime-local"
+                      value={reservationForm.expected_pickup_time}
+                      onChange={(e) =>
+                        setReservationForm({ ...reservationForm, expected_pickup_time: e.target.value })
+                      }
+                      className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">
+                      <StickyNote className="w-3 h-3 inline mr-1" />备注
+                    </label>
+                    <textarea
+                      value={reservationForm.notes}
+                      onChange={(e) =>
+                        setReservationForm({ ...reservationForm, notes: e.target.value })
+                      }
+                      rows={2}
+                      className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm resize-none"
+                      placeholder="可选"
+                    />
+                  </div>
+                  <div className="flex justify-end gap-2">
+                    <button
+                      onClick={() => setShowReservationForm(false)}
+                      className="px-3 py-1.5 text-sm text-gray-600 bg-gray-200 rounded hover:bg-gray-300"
+                    >
+                      取消
+                    </button>
+                    <button
+                      onClick={handleCreateReservation}
+                      disabled={reservationSubmitting}
+                      className="px-3 py-1.5 text-sm bg-teal-700 text-white rounded hover:bg-teal-800 disabled:opacity-50"
+                    >
+                      {reservationSubmitting ? "提交中..." : "确认登记"}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {groupedReservations.length === 0 ? (
+                <p className="text-center text-gray-400 py-12">暂无预约记录</p>
+              ) : (
+                groupedReservations.map((group) => {
+                  const activeItems = group.items.filter((r) => r.status === "queued" || r.status === "notified");
+                  const historyItems = group.items.filter((r) => r.status === "completed" || r.status === "cancelled");
+                  return (
+                    <div key={group.equipment_id} className="border border-gray-200 rounded-lg overflow-hidden">
+                      <div className="bg-gray-50 px-4 py-2.5 border-b border-gray-200 flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-gray-800 text-sm">{group.equipment.name}</span>
+                          <span className="text-xs text-gray-500">{group.equipment.type}</span>
+                          {activeItems.length > 0 && (
+                            <span className="inline-block px-2 py-0.5 rounded-full text-xs bg-amber-100 text-amber-700">
+                              排队 {activeItems.length} 人
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="divide-y divide-gray-100">
+                        {activeItems.map((r) => (
+                          <div key={r.id} className="px-4 py-3 bg-white">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="space-y-1 flex-1 min-w-0">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-amber-200 text-amber-800 text-xs font-bold">
+                                    #{r.queue_order + 1}
+                                  </span>
+                                  <span className="font-medium text-gray-900 text-sm">{r.borrower_name}</span>
+                                  <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${RESERVATION_STATUS_COLORS[r.status]}`}>
+                                    {RESERVATION_STATUS_LABELS[r.status]}
+                                  </span>
+                                </div>
+                                <div className="text-xs text-gray-500">
+                                  <Phone className="w-3 h-3 inline mr-0.5" />{r.borrower_phone}
+                                </div>
+                                {r.expected_pickup_time && (
+                                  <div className="text-xs text-gray-500">
+                                    <Clock className="w-3 h-3 inline mr-0.5" />预计：{formatDate(r.expected_pickup_time)}
+                                  </div>
+                                )}
+                                {r.notes && (
+                                  <div className="text-xs text-gray-500">
+                                    <StickyNote className="w-3 h-3 inline mr-0.5" />{r.notes}
+                                  </div>
+                                )}
+                                <div className="text-xs text-gray-400">
+                                  登记人：{r.operator_name} · {formatDate(r.created_at)}
+                                </div>
+                              </div>
+                              <div className="flex flex-col gap-1">
+                                {isAdmin && activeItems.length > 1 && (
+                                  <div className="flex gap-0.5">
+                                    <button
+                                      onClick={() => handleMoveReservation(r, -1)}
+                                      disabled={r.queue_order === 0}
+                                      className="p-1 text-gray-500 hover:text-teal-700 disabled:opacity-30 disabled:cursor-not-allowed"
+                                      title="上移"
+                                    >
+                                      <ArrowUp className="w-3.5 h-3.5" />
+                                    </button>
+                                    <button
+                                      onClick={() => handleMoveReservation(r, 1)}
+                                      disabled={r.queue_order === activeItems.length - 1}
+                                      className="p-1 text-gray-500 hover:text-teal-700 disabled:opacity-30 disabled:cursor-not-allowed"
+                                      title="下移"
+                                    >
+                                      <ArrowDown className="w-3.5 h-3.5" />
+                                    </button>
+                                  </div>
+                                )}
+                                <div className="flex gap-0.5 flex-wrap justify-end">
+                                  {r.status === "queued" && (isAdmin || r.operator_id === user?.id) && (
+                                    <button
+                                      onClick={() => handleNotifyReservation(r)}
+                                      className="p-1 text-blue-600 hover:text-blue-800"
+                                      title="通知"
+                                    >
+                                      <Bell className="w-4 h-4" />
+                                    </button>
+                                  )}
+                                  {(r.status === "queued" || r.status === "notified") && (isAdmin || r.operator_id === user?.id) && (
+                                    <>
+                                      <button
+                                        onClick={() => handleCompleteReservation(r)}
+                                        className="p-1 text-green-600 hover:text-green-800"
+                                        title="完成"
+                                      >
+                                        <CheckCircle2 className="w-4 h-4" />
+                                      </button>
+                                      <button
+                                        onClick={() => handleCancelReservation(r)}
+                                        className="p-1 text-red-500 hover:text-red-700"
+                                        title="取消"
+                                      >
+                                        <XCircle className="w-4 h-4" />
+                                      </button>
+                                    </>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                        {historyItems.length > 0 && (
+                          <div className="px-4 py-2 bg-gray-50/70">
+                            <div className="text-xs font-medium text-gray-500 mb-1.5">历史记录</div>
+                            <div className="space-y-1">
+                              {historyItems.map((r) => (
+                                <div key={r.id} className="text-xs flex items-center justify-between">
+                                  <div className="flex items-center gap-2">
+                                    <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${RESERVATION_STATUS_COLORS[r.status]}`}>
+                                      {RESERVATION_STATUS_LABELS[r.status]}
+                                    </span>
+                                    <span className="text-gray-600">{r.borrower_name}</span>
+                                    {r.cancel_reason && (
+                                      <span className="text-red-500">({r.cancel_reason})</span>
+                                    )}
+                                  </div>
+                                  <span className="text-gray-400">{formatDate(r.created_at)}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          )}
         </div>
       </div>
+
+      {nextReservationAlert && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4 border-2 border-blue-200">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100 bg-blue-50">
+              <h2 className="text-lg font-semibold text-blue-900 flex items-center gap-2">
+                <Bell className="w-5 h-5" />
+                下一位预约人已自动通知
+              </h2>
+              <button
+                onClick={() => setNextReservationAlert(null)}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="px-6 py-5 space-y-3">
+              <div className="p-3 bg-blue-50/50 rounded-lg border border-blue-100 space-y-1.5">
+                <div className="text-sm">
+                  <span className="text-gray-500">借用人：</span>
+                  <span className="font-medium text-gray-900">{nextReservationAlert.borrower_name}</span>
+                </div>
+                <div className="text-sm">
+                  <span className="text-gray-500">联系电话：</span>
+                  <span className="font-medium text-gray-900">{nextReservationAlert.borrower_phone}</span>
+                </div>
+                <div className="text-sm">
+                  <span className="text-gray-500">排队顺位：</span>
+                  <span className="font-medium text-blue-700">#{nextReservationAlert.queue_order + 1}</span>
+                </div>
+                {nextReservationAlert.notes && (
+                  <div className="text-sm">
+                    <span className="text-gray-500">备注：</span>
+                    <span className="text-gray-700">{nextReservationAlert.notes}</span>
+                  </div>
+                )}
+              </div>
+              <p className="text-xs text-gray-500">
+                请及时联系预约人确认取件时间。预约状态已自动切换为「已通知」。
+              </p>
+            </div>
+            <div className="px-6 py-3 border-t border-gray-100 flex justify-end">
+              <button
+                onClick={() => setNextReservationAlert(null)}
+                className="btn-primary text-sm"
+              >
+                我知道了
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {damageDialog && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">

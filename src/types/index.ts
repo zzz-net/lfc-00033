@@ -60,6 +60,46 @@ export interface EquipmentDetail {
   equipment: Equipment;
   deposit_timeline: DepositTransaction[];
   operation_logs: OperationLog[];
+  reservations: Reservation[];
+}
+
+export type ReservationStatus = "queued" | "notified" | "completed" | "cancelled";
+
+export interface Reservation {
+  id: number;
+  equipment_id: number;
+  equipment_name?: string;
+  equipment_type?: string;
+  borrower_name: string;
+  borrower_phone: string;
+  expected_pickup_time: string | null;
+  notes: string;
+  status: ReservationStatus;
+  queue_order: number;
+  operator_id: number;
+  operator_name: string;
+  version: number;
+  notified_at: string | null;
+  completed_at: string | null;
+  cancelled_at: string | null;
+  cancel_reason: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ReservationConflictError {
+  success: false;
+  error: string;
+  conflict: {
+    current_version: number;
+    submitted_version: number;
+    latest_version: number;
+    latest_updated_at: string;
+    latest_operator: {
+      operator_id: number;
+      operator_name: string;
+    };
+  };
 }
 
 export interface LoginResponse {

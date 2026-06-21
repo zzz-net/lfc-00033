@@ -52,6 +52,35 @@ router.post('/', authMiddleware, (req: Request, res: Response): void => {
        VALUES (?, ?, 'borrow', ?, ?, ?)`
     ).run(recordResult.lastInsertRowid, equipment_id, operator.id, operator.username, `借出设备 ${equipment.name} 给 ${borrower_name}，冻结押金 ${equipment.deposit_amount}`)
 
+    const matchingReservation = db.prepare(
+      `SELECT * FROM reservations 
+       WHERE equipment_id = ? AND borrower_name = ? AND borrower_phone = ? 
+         AND status IN ('queued', 'notified')
+       ORDER BY queue_order ASC LIMIT 1`
+    ).get(equipment_id, borrower_name, borrower_phone) as { id: number; queue_order: number } | undefined
+
+    if (matchingReservation) {
+      db.prepare(
+        `UPDATE reservations SET status = 'completed', completed_at = datetime('now', 'localtime'),
+         version = version + 1, updated_at = datetime('now', 'localtime') WHERE id = ?`
+      ).run(matchingReservation.id)
+
+      db.prepare(
+        `UPDATE reservations SET queue_order = queue_order - 1 
+         WHERE equipment_id = ? AND status IN ('queued', 'notified') AND queue_order > ?`
+      ).run(equipment_id, matchingReservation.queue_order)
+
+      db.prepare(
+        `INSERT INTO operation_logs (equipment_id, action, operator_id, operator_name, detail)
+         VALUES (?, 'reservation_auto_complete', ?, ?, ?)`
+      ).run(
+        equipment_id,
+        operator.id,
+        operator.username,
+        `借用人 ${borrower_name} 已实际借出设备 ${equipment.name}，自动完成对应预约`
+      )
+    }
+
     return db.prepare('SELECT * FROM borrow_records WHERE id = ?').get(recordResult.lastInsertRowid)
   })()
 
@@ -109,10 +138,37 @@ router.put('/:id/return', authMiddleware, (req: Request, res: Response): void =>
        VALUES (?, ?, 'return', ?, ?, ?)`
     ).run(id, record.equipment_id, operator.id, operator.username, `归还设备 ${equipment.name}，退还押金 ${refundAmount}`)
 
-    return db.prepare('SELECT * FROM borrow_records WHERE id = ?').get(id)
+    const nextReservation = db.prepare(
+      `SELECT * FROM reservations 
+       WHERE equipment_id = ? AND status = 'queued' 
+       ORDER BY queue_order ASC LIMIT 1`
+    ).get(record.equipment_id) as { id: number; borrower_name: string; borrower_phone: string } | undefined
+
+    let notifiedReservation = null
+    if (nextReservation) {
+      db.prepare(
+        `UPDATE reservations SET status = 'notified', notified_at = datetime('now', 'localtime'),
+         version = version + 1, updated_at = datetime('now', 'localtime') WHERE id = ?`
+      ).run(nextReservation.id)
+
+      db.prepare(
+        `INSERT INTO operation_logs (equipment_id, action, operator_id, operator_name, detail)
+         VALUES (?, 'reservation_auto_notify', ?, ?, ?)`
+      ).run(
+        record.equipment_id,
+        operator.id,
+        operator.username,
+        `设备 ${equipment.name} 已归还，自动通知下一位预约人 ${nextReservation.borrower_name}(${nextReservation.borrower_phone})`
+      )
+
+      notifiedReservation = db.prepare('SELECT * FROM reservations WHERE id = ?').get(nextReservation.id)
+    }
+
+    const borrowRecord = db.prepare('SELECT * FROM borrow_records WHERE id = ?').get(id)
+    return { borrowRecord, notifiedReservation }
   })()
 
-  res.json({ success: true, data: updated })
+  res.json({ success: true, data: updated.borrowRecord, next_reservation: updated.notifiedReservation })
 })
 
 router.put('/:id/damage', authMiddleware, (req: Request, res: Response): void => {

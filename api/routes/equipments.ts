@@ -114,12 +114,18 @@ router.get('/:id/detail', authMiddleware, (req: Request, res: Response): void =>
     'SELECT * FROM operation_logs WHERE equipment_id = ? ORDER BY created_at DESC'
   ).all(id)
 
+  const reservations = db.prepare(
+    `SELECT * FROM reservations WHERE equipment_id = ? 
+     ORDER BY queue_order ASC, created_at ASC`
+  ).all(id)
+
   res.json({
     success: true,
     data: {
       equipment,
       deposit_timeline: depositTimeline,
       operation_logs: operationLogs,
+      reservations,
     },
   })
 })

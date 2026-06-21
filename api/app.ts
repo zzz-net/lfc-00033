@@ -17,6 +17,7 @@ import borrowRoutes from './routes/borrows.js'
 import depositRoutes from './routes/deposits.js'
 import exportRoutes from './routes/export.js'
 import viewRoutes from './routes/views.js'
+import reservationRoutes from './routes/reservations.js'
 import './db.js'
 
 // for esm mode
@@ -41,6 +42,7 @@ app.use('/api/borrows', borrowRoutes)
 app.use('/api/deposits', depositRoutes)
 app.use('/api/export', exportRoutes)
 app.use('/api/views', viewRoutes)
+app.use('/api/reservations', reservationRoutes)
 
 /**
  * health
@@ -59,9 +61,10 @@ app.use(
  * error handler middleware
  */
 app.use((error: Error, req: Request, res: Response, next: NextFunction) => {
+  console.error('[API Error]', req.method, req.path, error.message, error.stack)
   res.status(500).json({
     success: false,
-    error: 'Server internal error',
+    error: 'Server internal error: ' + error.message,
   })
 })
 

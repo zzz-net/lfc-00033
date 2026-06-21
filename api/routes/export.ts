@@ -92,4 +92,32 @@ router.get('/deposits', authMiddleware, adminMiddleware, (req: Request, res: Res
   sendCsv(res, 'deposits.csv', header, csvRows)
 })
 
+router.get('/reservations', authMiddleware, adminMiddleware, (req: Request, res: Response): void => {
+  const { status, equipment_id, borrower_name, equipment_name } = req.query
+  let sql = `SELECT r.*, e.name as equipment_name, e.type as equipment_type
+    FROM reservations r
+    JOIN equipments e ON r.equipment_id = e.id
+    WHERE 1=1`
+  const params: unknown[] = []
+
+  if (status) { sql += ' AND r.status = ?'; params.push(status) }
+  if (equipment_id) { sql += ' AND r.equipment_id = ?'; params.push(equipment_id) }
+  if (borrower_name) { sql += ' AND r.borrower_name LIKE ?'; params.push(`%${borrower_name}%`) }
+  if (equipment_name) { sql += ' AND e.name LIKE ?'; params.push(`%${equipment_name}%`) }
+
+  sql += ' ORDER BY r.equipment_id ASC, r.queue_order ASC, r.created_at ASC'
+
+  const rows = db.prepare(sql).all(...params) as Record<string, unknown>[]
+  const header = toCsvRow(['ID', '设备名称', '设备类型', '借用人', '联系电话', '预计取用时间', '排队顺位', '状态', '备注', '操作人', '创建时间', '通知时间', '完成时间', '取消时间', '取消原因'])
+  const statusMap: Record<string, string> = { queued: '排队中', notified: '已通知', completed: '已完成', cancelled: '已取消' }
+  const csvRows = rows.map(r => toCsvRow([
+    r.id, r.equipment_name, r.equipment_type, r.borrower_name, r.borrower_phone,
+    r.expected_pickup_time,
+    (r.status === 'queued' || r.status === 'notified') ? `#${Number(r.queue_order) + 1}` : '-',
+    statusMap[String(r.status)] || r.status,
+    r.notes, r.operator_name, r.created_at, r.notified_at, r.completed_at, r.cancelled_at, r.cancel_reason
+  ]))
+  sendCsv(res, 'reservations.csv', header, csvRows)
+})
+
 export default router

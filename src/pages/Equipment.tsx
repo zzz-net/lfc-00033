@@ -1588,6 +1588,12 @@ export default function EquipmentPage() {
             setShowDrawer(false);
             setDrawerDetail(null);
           }}
+          onRefresh={() => {
+            if (drawerDetail?.equipment?.id) {
+              handleRowClick(drawerDetail.equipment.id);
+            }
+            fetchEquipments();
+          }}
         />
       )}
     </div>

@@ -114,6 +114,30 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_view_snapshots_view_id ON view_snapshots(view_id);
 
+  CREATE TABLE IF NOT EXISTS reservations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    equipment_id INTEGER NOT NULL REFERENCES equipments(id),
+    borrower_name TEXT NOT NULL,
+    borrower_phone TEXT NOT NULL,
+    expected_pickup_time TEXT,
+    notes TEXT DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued', 'notified', 'completed', 'cancelled')),
+    queue_order INTEGER NOT NULL DEFAULT 0,
+    operator_id INTEGER NOT NULL REFERENCES users(id),
+    operator_name TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    notified_at TEXT,
+    completed_at TEXT,
+    cancelled_at TEXT,
+    cancel_reason TEXT DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_reservations_equipment ON reservations(equipment_id);
+  CREATE INDEX IF NOT EXISTS idx_reservations_status ON reservations(status);
+  CREATE INDEX IF NOT EXISTS idx_reservations_borrower ON reservations(borrower_name, borrower_phone);
+
   CREATE TABLE IF NOT EXISTS view_operation_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     view_id INTEGER REFERENCES saved_views(id),
@@ -178,6 +202,24 @@ if (!hasSnapshots) {
     );
     CREATE INDEX IF NOT EXISTS idx_view_snapshots_view_id ON view_snapshots(view_id);
   `)
+}
+
+const resColumns = db.prepare("PRAGMA table_info(reservations)").all() as { name: string }[]
+const resColNames = new Set(resColumns.map(c => c.name))
+const needResCols = [
+  { name: 'queue_order', def: 'INTEGER NOT NULL DEFAULT 0' },
+  { name: 'operator_id', def: 'INTEGER NOT NULL REFERENCES users(id) DEFAULT 1' },
+  { name: 'operator_name', def: 'TEXT NOT NULL DEFAULT "system"' },
+  { name: 'version', def: 'INTEGER NOT NULL DEFAULT 1' },
+  { name: 'notified_at', def: 'TEXT' },
+  { name: 'completed_at', def: 'TEXT' },
+  { name: 'cancelled_at', def: 'TEXT' },
+  { name: 'cancel_reason', def: 'TEXT DEFAULT ""' },
+]
+for (const col of needResCols) {
+  if (!resColNames.has(col.name)) {
+    db.prepare(`ALTER TABLE reservations ADD COLUMN ${col.name} ${col.def}`).run()
+  }
 }
 
 const logCount = db.prepare('SELECT COUNT(*) as count FROM view_operation_logs').get() as { count: number }

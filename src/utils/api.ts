@@ -9,6 +9,7 @@ import type {
   ViewSnapshot,
   ViewOperationLog,
   PaginatedEquipments,
+  Reservation,
 } from "@/types";
 
 const BASE_URL = "/api";
@@ -151,10 +152,15 @@ export const api = {
     ),
 
   returnBorrow: (id: number) =>
-    request<{ record: BorrowRecord; deposit_transaction: DepositTransaction }>(
-      `/borrows/${id}/return`,
-      { method: "PUT" }
-    ),
+    request<{
+      data?: BorrowRecord;
+      success?: boolean;
+      record?: BorrowRecord;
+      deposit_transaction?: DepositTransaction;
+      next_reservation?: Reservation;
+    }>(`/borrows/${id}/return`, {
+      method: "PUT",
+    }),
 
   reportDamage: (id: number, damage_description: string) =>
     request<BorrowRecord>(`/borrows/${id}/damage`, {
@@ -288,4 +294,60 @@ export const api = {
     if (includeAll) qs.set("include_all", "true");
     return request<ViewOperationLog[]>(`/views/logs?${qs.toString()}`);
   },
+
+  createReservation: (data: {
+    equipment_id: number;
+    borrower_name: string;
+    borrower_phone: string;
+    expected_pickup_time?: string;
+    notes?: string;
+  }) =>
+    request<Reservation>("/reservations", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  getReservations: (params?: {
+    status?: string;
+    equipment_id?: number;
+    borrower_name?: string;
+    equipment_name?: string;
+  }) => {
+    const qs = new URLSearchParams();
+    if (params?.status) qs.set("status", params.status);
+    if (params?.equipment_id) qs.set("equipment_id", String(params.equipment_id));
+    if (params?.borrower_name) qs.set("borrower_name", params.borrower_name);
+    if (params?.equipment_name) qs.set("equipment_name", params.equipment_name);
+    const query = qs.toString();
+    return request<Reservation[]>(`/reservations${query ? `?${query}` : ""}`);
+  },
+
+  notifyReservation: (id: number) =>
+    request<Reservation>(`/reservations/${id}/notify`, { method: "PUT" }),
+
+  completeReservation: (id: number, expected_version?: number) =>
+    request<Reservation>(`/reservations/${id}/complete`, {
+      method: "PUT",
+      body: JSON.stringify({ expected_version }),
+    }),
+
+  cancelReservation: (id: number, cancel_reason?: string, expected_version?: number) =>
+    request<Reservation>(`/reservations/${id}/cancel`, {
+      method: "PUT",
+      body: JSON.stringify({ cancel_reason, expected_version }),
+    }),
+
+  reorderReservations: (equipment_id: number, orders: { id: number; queue_order: number }[]) =>
+    request<Reservation[]>("/reservations/reorder", {
+      method: "PUT",
+      body: JSON.stringify({ equipment_id, orders }),
+    }),
+
+  exportReservations: (params?: {
+    status?: string;
+    equipment_id?: number;
+    borrower_name?: string;
+    equipment_name?: string;
+  }) =>
+    downloadFile("/export/reservations", "预约排队.csv", params as Record<string, string>),
 };
