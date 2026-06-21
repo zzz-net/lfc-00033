@@ -12,6 +12,7 @@ export function formatDate(dateStr: string | null): string {
 export const EQUIPMENT_STATUS_LABELS: Record<string, string> = {
   available: "可用",
   borrowed: "已借出",
+  reserved: "已预约",
   damaged: "已损坏",
   pending_confirm: "待确认",
 };
@@ -19,6 +20,7 @@ export const EQUIPMENT_STATUS_LABELS: Record<string, string> = {
 export const EQUIPMENT_STATUS_COLORS: Record<string, string> = {
   available: "bg-green-100 text-green-800",
   borrowed: "bg-blue-100 text-blue-800",
+  reserved: "bg-purple-100 text-purple-800",
   damaged: "bg-red-100 text-red-800",
   pending_confirm: "bg-yellow-100 text-yellow-800",
 };

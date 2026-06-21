@@ -1,11 +1,13 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
-import { X, Download, Plus, User, Phone, Clock, StickyNote, Bell, CheckCircle2, XCircle, ArrowUp, ArrowDown, ListTodo } from "lucide-react";
+import { X, Download, Plus, User, Phone, Clock, StickyNote, Bell, CheckCircle2, XCircle, ArrowUp, ArrowDown, ListTodo, AlertTriangle } from "lucide-react";
 import { api } from "@/utils/api";
 import { useAuthStore } from "@/store/authStore";
 import { toast } from "@/components/Toast";
 import { formatAmount, formatDate, EQUIPMENT_STATUS_LABELS, EQUIPMENT_STATUS_COLORS, RESERVATION_STATUS_LABELS, RESERVATION_STATUS_COLORS } from "@/utils/helpers";
 import { useLocalStorage } from "@/hooks/useLocalStorage";
 import type { Equipment, BorrowRecord, Reservation } from "@/types";
+
+type EquipmentWithNotified = Equipment & { notifiedReservation: Reservation | null };
 
 type TabKey = "borrow" | "return" | "damage" | "reservations";
 
@@ -24,6 +26,7 @@ export default function BorrowReturnPage() {
 
   const [availableEquipments, setAvailableEquipments] = useState<Equipment[]>([]);
   const [borrowedEquipments, setBorrowedEquipments] = useState<Equipment[]>([]);
+  const [reservedEquipments, setReservedEquipments] = useState<Equipment[]>([]);
   const [borrowedRecords, setBorrowedRecords] = useState<BorrowRecord[]>([]);
   const [pendingRecords, setPendingRecords] = useState<BorrowRecord[]>([]);
   const [reservations, setReservations] = useState<Reservation[]>([]);
@@ -71,6 +74,15 @@ export default function BorrowReturnPage() {
     }
   }, []);
 
+  const fetchReservedEquipments = useCallback(async () => {
+    try {
+      const res = await api.getEquipments({ status: "reserved" });
+      setReservedEquipments(res.data);
+    } catch (err: unknown) {
+      toast(err instanceof Error ? err.message : "加载失败", "error");
+    }
+  }, []);
+
   const fetchBorrowed = useCallback(async () => {
     try {
       const data = await api.getBorrows({ status: "borrowed" });
@@ -101,18 +113,48 @@ export default function BorrowReturnPage() {
   const refreshAll = useCallback(() => {
     fetchAvailable();
     fetchBorrowedEquipments();
+    fetchReservedEquipments();
     fetchBorrowed();
     fetchPending();
     fetchReservations();
-  }, [fetchAvailable, fetchBorrowedEquipments, fetchBorrowed, fetchPending, fetchReservations]);
+  }, [fetchAvailable, fetchBorrowedEquipments, fetchReservedEquipments, fetchBorrowed, fetchPending, fetchReservations]);
 
   useEffect(() => {
     refreshAll();
   }, [refreshAll]);
 
-  const selectedEquip = availableEquipments.find(
+  const borrowableEquipments: EquipmentWithNotified[] = useMemo(() => {
+    const availWithNotified = availableEquipments.map((eq) => ({
+      ...eq,
+      notifiedReservation: null as Reservation | null,
+    }));
+    const reservedWithNotified = reservedEquipments.map((eq) => {
+      const notified = reservations.find(
+        (r) => r.equipment_id === eq.id && r.status === "notified"
+      );
+      return { ...eq, notifiedReservation: notified || null };
+    });
+    return [...availWithNotified, ...reservedWithNotified].sort((a, b) =>
+      a.name.localeCompare(b.name)
+    );
+  }, [availableEquipments, reservedEquipments, reservations]);
+
+  const selectedEquip = borrowableEquipments.find(
     (e) => e.id === borrowForm.equipment_id
   );
+
+  const handleBorrowFormEquipmentChange = (equipmentId: number) => {
+    const eq = borrowableEquipments.find((e) => e.id === equipmentId);
+    if (eq && eq.status === "reserved" && eq.notifiedReservation) {
+      setBorrowForm({
+        equipment_id: equipmentId,
+        borrower_name: eq.notifiedReservation.borrower_name,
+        borrower_phone: eq.notifiedReservation.borrower_phone,
+      });
+    } else {
+      setBorrowForm({ ...borrowForm, equipment_id: equipmentId });
+    }
+  };
 
   const handleBorrow = async () => {
     if (!borrowForm.equipment_id) {
@@ -133,8 +175,13 @@ export default function BorrowReturnPage() {
       toast("借出成功", "success");
       setBorrowForm({ equipment_id: 0, borrower_name: "", borrower_phone: "" });
       refreshAll();
-    } catch (err: unknown) {
-      toast(err instanceof Error ? err.message : "借出失败", "error");
+    } catch (err: any) {
+      if (err?.conflict) {
+        toast("设备状态在提交时已变更，请刷新后重试", "error");
+        refreshAll();
+      } else {
+        toast(err instanceof Error ? err.message : "借出失败", "error");
+      }
     } finally {
       setSubmitting(false);
     }
@@ -214,8 +261,13 @@ export default function BorrowReturnPage() {
       setShowReservationForm(false);
       setReservationForm({ equipment_id: 0, borrower_name: "", borrower_phone: "", expected_pickup_time: "", notes: "" });
       refreshAll();
-    } catch (err: unknown) {
-      toast(err instanceof Error ? err.message : "预约登记失败", "error");
+    } catch (err: any) {
+      if (err?.conflict) {
+        toast("设备状态在提交时已变更，请刷新后重试", "error");
+        refreshAll();
+      } else {
+        toast(err instanceof Error ? err.message : "预约登记失败", "error");
+      }
     } finally {
       setReservationSubmitting(false);
     }
@@ -251,14 +303,14 @@ export default function BorrowReturnPage() {
     try {
       await api.cancelReservation(r.id, reason, r.version);
       toast("预约已取消", "success");
-      fetchReservations();
+      refreshAll();
     } catch (err: any) {
       if (err?.conflict) {
         toast("该预约已被其他操作更新，请刷新后重试", "error");
       } else {
         toast(err instanceof Error ? err.message : "取消失败", "error");
       }
-      fetchReservations();
+      refreshAll();
     }
   };
 
@@ -304,26 +356,26 @@ export default function BorrowReturnPage() {
   };
 
   const groupedReservations = useMemo(() => {
-    const map = new Map<number, { equipment: { id: number; name: string; type: string } | null; items: Reservation[] }>();
+    const map = new Map<number, { equipment: { id: number; name: string; type: string; status: string } | null; items: Reservation[] }>();
     for (const r of reservations) {
       if (!map.has(r.equipment_id)) {
         map.set(r.equipment_id, { equipment: null, items: [] });
       }
       map.get(r.equipment_id)!.items.push(r);
     }
-    for (const e of [...availableEquipments, ...borrowedEquipments]) {
+    for (const e of [...availableEquipments, ...borrowedEquipments, ...reservedEquipments]) {
       if (map.has(e.id)) {
-        map.get(e.id)!.equipment = { id: e.id, name: e.name, type: e.type };
+        map.get(e.id)!.equipment = { id: e.id, name: e.name, type: e.type, status: e.status };
       }
     }
     return Array.from(map.entries())
       .map(([id, v]) => ({
         equipment_id: id,
-        equipment: v.equipment || { id, name: `设备#${id}`, type: "" },
+        equipment: v.equipment || { id, name: `设备#${id}`, type: "", status: "" },
         items: v.items.sort((a, b) => a.queue_order - b.queue_order),
       }))
       .sort((a, b) => a.equipment.name.localeCompare(b.equipment.name));
-  }, [reservations, availableEquipments, borrowedEquipments]);
+  }, [reservations, availableEquipments, borrowedEquipments, reservedEquipments]);
 
   return (
     <div className="space-y-4">
@@ -364,26 +416,57 @@ export default function BorrowReturnPage() {
                 <label className="block text-sm font-medium text-gray-700 mb-1">选择设备</label>
                 <select
                   value={borrowForm.equipment_id}
-                  onChange={(e) =>
-                    setBorrowForm({ ...borrowForm, equipment_id: Number(e.target.value) })
-                  }
+                  onChange={(e) => handleBorrowFormEquipmentChange(Number(e.target.value))}
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white"
                 >
                   <option value={0}>请选择可用设备</option>
-                  {availableEquipments.map((eq) => (
-                    <option key={eq.id} value={eq.id}>
-                      {eq.name}（{eq.type}）
-                    </option>
-                  ))}
+                  {availableEquipments.length > 0 && (
+                    <optgroup label="可借">
+                      {availableEquipments.map((eq) => (
+                        <option key={eq.id} value={eq.id}>
+                          {eq.name}（{eq.type}）
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                  {reservedEquipments.length > 0 && (
+                    <optgroup label="已预约 - 待取用">
+                      {reservedEquipments.map((eq) => {
+                        const notified = reservations.find(
+                          (r) => r.equipment_id === eq.id && r.status === "notified"
+                        );
+                        return (
+                          <option key={eq.id} value={eq.id}>
+                            {eq.name}（{eq.type}）→ {notified ? `${notified.borrower_name}` : "待通知"}
+                          </option>
+                        );
+                      })}
+                    </optgroup>
+                  )}
                 </select>
               </div>
 
               {selectedEquip && (
-                <div className="bg-teal-50 rounded-lg px-4 py-3 text-sm">
-                  <span className="text-gray-600">押金金额：</span>
-                  <span className="font-semibold text-teal-700">
-                    {formatAmount(selectedEquip.deposit_amount)}
-                  </span>
+                <div className={`rounded-lg px-4 py-3 text-sm ${selectedEquip.status === "reserved" ? "bg-purple-50 border border-purple-200" : "bg-teal-50"}`}>
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <span className="text-gray-600">押金金额：</span>
+                      <span className={`font-semibold ${selectedEquip.status === "reserved" ? "text-purple-700" : "text-teal-700"}`}>
+                        {formatAmount(selectedEquip.deposit_amount)}
+                      </span>
+                    </div>
+                    {selectedEquip.status === "reserved" && (
+                      <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${EQUIPMENT_STATUS_COLORS.reserved}`}>
+                        {EQUIPMENT_STATUS_LABELS.reserved}
+                      </span>
+                    )}
+                  </div>
+                  {selectedEquip.status === "reserved" && selectedEquip.notifiedReservation && (
+                    <div className="mt-2 text-xs text-purple-600">
+                      <AlertTriangle className="w-3 h-3 inline mr-1" />
+                      该设备已预约给 {selectedEquip.notifiedReservation.borrower_name}，借用人信息已自动填入
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -428,27 +511,42 @@ export default function BorrowReturnPage() {
               {borrowedRecords.length === 0 ? (
                 <p className="text-center text-gray-400 py-8">暂无待归还记录</p>
               ) : (
-                borrowedRecords.map((r, idx) => (
-                  <div
-                    key={r.id}
-                    className={`flex items-center justify-between px-5 py-3 rounded-lg border border-gray-100 ${
-                      idx % 2 === 1 ? "bg-gray-50/50" : "bg-white"
-                    }`}
-                  >
-                    <div className="space-y-1">
-                      <div className="font-medium text-gray-900">{r.equipment_name}</div>
-                      <div className="text-sm text-gray-500">
-                        借用人：{r.borrower_name}（{r.borrower_phone}）
-                      </div>
-                      <div className="text-xs text-gray-400">
-                        借出时间：{formatDate(r.borrow_time)} | 押金：{formatAmount(r.deposit_frozen)}
+                borrowedRecords.map((r, idx) => {
+                  const pendingReservations = reservations.filter(
+                    (rv) => rv.equipment_id === r.equipment_id && (rv.status === "queued" || rv.status === "notified")
+                  );
+                  return (
+                    <div
+                      key={r.id}
+                      className={`rounded-lg border ${
+                        pendingReservations.length > 0
+                          ? "border-purple-200 bg-purple-50/30"
+                          : `border-gray-100 ${idx % 2 === 1 ? "bg-gray-50/50" : "bg-white"}`
+                      }`}
+                    >
+                      <div className="flex items-center justify-between px-5 py-3">
+                        <div className="space-y-1">
+                          <div className="font-medium text-gray-900">{r.equipment_name}</div>
+                          <div className="text-sm text-gray-500">
+                            借用人：{r.borrower_name}（{r.borrower_phone}）
+                          </div>
+                          <div className="text-xs text-gray-400">
+                            借出时间：{formatDate(r.borrow_time)} | 押金：{formatAmount(r.deposit_frozen)}
+                          </div>
+                          {pendingReservations.length > 0 && (
+                            <div className="text-xs text-purple-600 mt-1">
+                              <AlertTriangle className="w-3 h-3 inline mr-0.5" />
+                              归还后将自动通知 {pendingReservations.length} 位排队预约人，设备将变为「已预约」状态
+                            </div>
+                          )}
+                        </div>
+                        <button onClick={() => handleReturn(r.id)} className="btn-primary text-sm">
+                          归还
+                        </button>
                       </div>
                     </div>
-                    <button onClick={() => handleReturn(r.id)} className="btn-primary text-sm">
-                      归还
-                    </button>
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
           )}
@@ -547,82 +645,95 @@ export default function BorrowReturnPage() {
 
               {showReservationForm && (
                 <div className="bg-gray-50 rounded-lg p-4 border border-gray-200 space-y-3 max-w-2xl">
-                  <div>
-                    <label className="block text-xs font-medium text-gray-600 mb-1">选择设备</label>
-                    <select
-                      value={reservationForm.equipment_id}
-                      onChange={(e) =>
-                        setReservationForm({ ...reservationForm, equipment_id: Number(e.target.value) })
-                      }
-                      className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm bg-white"
-                    >
-                      <option value={0}>请选择设备（可选择已借出的设备进行预约）</option>
-                      {[...availableEquipments, ...borrowedEquipments]
-                        .sort((a, b) => a.name.localeCompare(b.name))
-                        .map((eq) => (
-                          <option key={eq.id} value={eq.id}>
-                            {eq.name}（{eq.type}）- {EQUIPMENT_STATUS_LABELS[eq.status]}
-                          </option>
-                        ))}
-                    </select>
-                  </div>
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-xs font-medium text-gray-600 mb-1">
-                        <User className="w-3 h-3 inline mr-1" />借用人姓名
-                      </label>
-                      <input
-                        type="text"
-                        value={reservationForm.borrower_name}
-                        onChange={(e) =>
-                          setReservationForm({ ...reservationForm, borrower_name: e.target.value })
-                        }
-                        className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm"
-                        placeholder="请输入姓名"
-                      />
+                  {borrowedEquipments.length === 0 ? (
+                    <div className="bg-yellow-50 border border-yellow-200 rounded-lg px-4 py-3 text-sm text-yellow-800">
+                      当前没有已借出的设备，无法登记预约。只有「已借出」的设备才能进行预约登记。
                     </div>
-                    <div>
-                      <label className="block text-xs font-medium text-gray-600 mb-1">
-                        <Phone className="w-3 h-3 inline mr-1" />借用人电话
-                      </label>
-                      <input
-                        type="text"
-                        value={reservationForm.borrower_phone}
-                        onChange={(e) =>
-                          setReservationForm({ ...reservationForm, borrower_phone: e.target.value })
-                        }
-                        className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm"
-                        placeholder="请输入电话"
-                      />
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-600 mb-1">
-                      <Clock className="w-3 h-3 inline mr-1" />预计取用时间
-                    </label>
-                    <input
-                      type="datetime-local"
-                      value={reservationForm.expected_pickup_time}
-                      onChange={(e) =>
-                        setReservationForm({ ...reservationForm, expected_pickup_time: e.target.value })
-                      }
-                      className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-600 mb-1">
-                      <StickyNote className="w-3 h-3 inline mr-1" />备注
-                    </label>
-                    <textarea
-                      value={reservationForm.notes}
-                      onChange={(e) =>
-                        setReservationForm({ ...reservationForm, notes: e.target.value })
-                      }
-                      rows={2}
-                      className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm resize-none"
-                      placeholder="可选"
-                    />
-                  </div>
+                  ) : (
+                    <>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-600 mb-1">选择设备（仅限已借出的设备）</label>
+                        <select
+                          value={reservationForm.equipment_id}
+                          onChange={(e) =>
+                            setReservationForm({ ...reservationForm, equipment_id: Number(e.target.value) })
+                          }
+                          className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm bg-white"
+                        >
+                          <option value={0}>请选择已借出的设备</option>
+                          {borrowedEquipments
+                            .sort((a, b) => a.name.localeCompare(b.name))
+                            .map((eq) => {
+                              const activeCount = reservations.filter(
+                                (r) => r.equipment_id === eq.id && (r.status === "queued" || r.status === "notified")
+                              ).length;
+                              return (
+                                <option key={eq.id} value={eq.id}>
+                                  {eq.name}（{eq.type}）{activeCount > 0 ? `- 排队 ${activeCount} 人` : ""}
+                                </option>
+                              );
+                            })}
+                        </select>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-xs font-medium text-gray-600 mb-1">
+                            <User className="w-3 h-3 inline mr-1" />借用人姓名
+                          </label>
+                          <input
+                            type="text"
+                            value={reservationForm.borrower_name}
+                            onChange={(e) =>
+                              setReservationForm({ ...reservationForm, borrower_name: e.target.value })
+                            }
+                            className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm"
+                            placeholder="请输入姓名"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-gray-600 mb-1">
+                            <Phone className="w-3 h-3 inline mr-1" />借用人电话
+                          </label>
+                          <input
+                            type="text"
+                            value={reservationForm.borrower_phone}
+                            onChange={(e) =>
+                              setReservationForm({ ...reservationForm, borrower_phone: e.target.value })
+                            }
+                            className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm"
+                            placeholder="请输入电话"
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-600 mb-1">
+                          <Clock className="w-3 h-3 inline mr-1" />预计取用时间
+                        </label>
+                        <input
+                          type="datetime-local"
+                          value={reservationForm.expected_pickup_time}
+                          onChange={(e) =>
+                            setReservationForm({ ...reservationForm, expected_pickup_time: e.target.value })
+                          }
+                          className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-600 mb-1">
+                          <StickyNote className="w-3 h-3 inline mr-1" />备注
+                        </label>
+                        <textarea
+                          value={reservationForm.notes}
+                          onChange={(e) =>
+                            setReservationForm({ ...reservationForm, notes: e.target.value })
+                          }
+                          rows={2}
+                          className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm resize-none"
+                          placeholder="可选"
+                        />
+                      </div>
+                    </>
+                  )}
                   <div className="flex justify-end gap-2">
                     <button
                       onClick={() => setShowReservationForm(false)}
@@ -630,13 +741,15 @@ export default function BorrowReturnPage() {
                     >
                       取消
                     </button>
-                    <button
-                      onClick={handleCreateReservation}
-                      disabled={reservationSubmitting}
-                      className="px-3 py-1.5 text-sm bg-teal-700 text-white rounded hover:bg-teal-800 disabled:opacity-50"
-                    >
-                      {reservationSubmitting ? "提交中..." : "确认登记"}
-                    </button>
+                    {borrowedEquipments.length > 0 && (
+                      <button
+                        onClick={handleCreateReservation}
+                        disabled={reservationSubmitting}
+                        className="px-3 py-1.5 text-sm bg-teal-700 text-white rounded hover:bg-teal-800 disabled:opacity-50"
+                      >
+                        {reservationSubmitting ? "提交中..." : "确认登记"}
+                      </button>
+                    )}
                   </div>
                 </div>
               )}
@@ -647,12 +760,16 @@ export default function BorrowReturnPage() {
                 groupedReservations.map((group) => {
                   const activeItems = group.items.filter((r) => r.status === "queued" || r.status === "notified");
                   const historyItems = group.items.filter((r) => r.status === "completed" || r.status === "cancelled");
+                  const equipStatus = group.equipment.status;
                   return (
                     <div key={group.equipment_id} className="border border-gray-200 rounded-lg overflow-hidden">
                       <div className="bg-gray-50 px-4 py-2.5 border-b border-gray-200 flex items-center justify-between">
                         <div className="flex items-center gap-2">
                           <span className="font-medium text-gray-800 text-sm">{group.equipment.name}</span>
                           <span className="text-xs text-gray-500">{group.equipment.type}</span>
+                          <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${EQUIPMENT_STATUS_COLORS[equipStatus] || "bg-gray-100 text-gray-600"}`}>
+                            {EQUIPMENT_STATUS_LABELS[equipStatus] || equipStatus}
+                          </span>
                           {activeItems.length > 0 && (
                             <span className="inline-block px-2 py-0.5 rounded-full text-xs bg-amber-100 text-amber-700">
                               排队 {activeItems.length} 人
@@ -813,7 +930,7 @@ export default function BorrowReturnPage() {
                 )}
               </div>
               <p className="text-xs text-gray-500">
-                请及时联系预约人确认取件时间。预约状态已自动切换为「已通知」。
+                请及时联系预约人确认取件时间。预约状态已自动切换为「已通知」，设备状态变为「已预约」。
               </p>
             </div>
             <div className="px-6 py-3 border-t border-gray-100 flex justify-end">

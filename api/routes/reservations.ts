@@ -31,11 +31,47 @@ function buildReservationConflictError(
   }
 }
 
+function checkAndUpdateReservedEquipment(equipmentId: number): void {
+  const activeCount = db.prepare(
+    "SELECT COUNT(*) as cnt FROM reservations WHERE equipment_id = ? AND status IN ('queued', 'notified')"
+  ).get(equipmentId) as { cnt: number }
+
+  const equipment = db.prepare('SELECT status FROM equipments WHERE id = ?').get(equipmentId) as { status: string } | undefined
+  if (!equipment) return
+
+  if (activeCount.cnt === 0 && equipment.status === 'reserved') {
+    db.prepare("UPDATE equipments SET status = 'available', updated_at = datetime('now', 'localtime') WHERE id = ?").run(equipmentId)
+  }
+}
+
+function autoNotifyNextIfNeeded(equipmentId: number, operatorId: number, operatorName: string, equipmentName: string): void {
+  const nextQueued = db.prepare(
+    "SELECT * FROM reservations WHERE equipment_id = ? AND status = 'queued' ORDER BY queue_order ASC LIMIT 1"
+  ).get(equipmentId) as { id: number; borrower_name: string; borrower_phone: string } | undefined
+
+  if (!nextQueued) return
+
+  db.prepare(
+    `UPDATE reservations SET status = 'notified', notified_at = datetime('now', 'localtime'),
+     version = version + 1, updated_at = datetime('now', 'localtime') WHERE id = ?`
+  ).run(nextQueued.id)
+
+  db.prepare(
+    `INSERT INTO operation_logs (equipment_id, action, operator_id, operator_name, detail)
+     VALUES (?, 'reservation_auto_notify', ?, ?, ?)`
+  ).run(
+    equipmentId,
+    operatorId,
+    operatorName,
+    `取消后自动通知下一位预约人 ${nextQueued.borrower_name}(${nextQueued.borrower_phone}) 取用设备 ${equipmentName}`
+  )
+}
+
 router.get('/', authMiddleware, (req: Request, res: Response): void => {
   const { status, equipment_id, borrower_name, equipment_name } = req.query
   const operator = req.user!
 
-  let sql = `SELECT r.*, e.name as equipment_name, e.type as equipment_type
+  let sql = `SELECT r.*, e.name as equipment_name, e.type as equipment_type, e.status as equipment_status
     FROM reservations r
     JOIN equipments e ON r.equipment_id = e.id
     WHERE 1=1`
@@ -81,10 +117,21 @@ router.post('/', authMiddleware, (req: Request, res: Response): void => {
   const equipment = db.prepare('SELECT * FROM equipments WHERE id = ?').get(equipment_id) as {
     id: number
     name: string
+    status: string
   } | undefined
 
   if (!equipment) {
     res.status(404).json({ success: false, error: '设备不存在' })
+    return
+  }
+
+  if (equipment.status !== 'borrowed') {
+    const statusLabels: Record<string, string> = {
+      available: '可借', borrowed: '已借出', reserved: '已预约',
+      damaged: '已损坏', pending_confirm: '待确认',
+    }
+    const label = statusLabels[equipment.status] || equipment.status
+    res.status(400).json({ success: false, error: `只有「已借出」的设备才能登记预约，当前设备状态为「${label}」` })
     return
   }
 
@@ -99,40 +146,58 @@ router.post('/', authMiddleware, (req: Request, res: Response): void => {
     return
   }
 
-  const result = db.transaction(() => {
-    const maxOrder = db.prepare(
-      "SELECT COALESCE(MAX(queue_order), -1) as max_order FROM reservations WHERE equipment_id = ? AND status IN ('queued', 'notified')"
-    ).get(equipment_id) as { max_order: number }
-    const nextOrder = maxOrder.max_order + 1
+  let result
+  try {
+    result = db.transaction(() => {
+      const recheck = db.prepare('SELECT status FROM equipments WHERE id = ?').get(equipment_id) as { status: string } | undefined
+      if (!recheck || recheck.status !== 'borrowed') {
+        throw new Error('CONCURRENT_CHANGE')
+      }
 
-    const insertResult = db.prepare(
-      `INSERT INTO reservations 
+      const maxOrder = db.prepare(
+        "SELECT COALESCE(MAX(queue_order), -1) as max_order FROM reservations WHERE equipment_id = ? AND status IN ('queued', 'notified')"
+      ).get(equipment_id) as { max_order: number }
+      const nextOrder = maxOrder.max_order + 1
+
+      const insertResult = db.prepare(
+        `INSERT INTO reservations 
        (equipment_id, borrower_name, borrower_phone, expected_pickup_time, notes, 
         status, queue_order, operator_id, operator_name)
        VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?)`
-    ).run(
-      equipment_id,
-      borrower_name.trim(),
-      borrower_phone.trim(),
-      expected_pickup_time || null,
-      notes || '',
-      nextOrder,
-      operator.id,
-      operator.username
-    )
+      ).run(
+        equipment_id,
+        borrower_name.trim(),
+        borrower_phone.trim(),
+        expected_pickup_time || null,
+        notes || '',
+        nextOrder,
+        operator.id,
+        operator.username
+      )
 
-    db.prepare(
-      `INSERT INTO operation_logs (equipment_id, action, operator_id, operator_name, detail)
+      db.prepare(
+        `INSERT INTO operation_logs (equipment_id, action, operator_id, operator_name, detail)
        VALUES (?, 'reservation_create', ?, ?, ?)`
-    ).run(
-      equipment_id,
-      operator.id,
-      operator.username,
-      `为 ${borrower_name.trim()}(${borrower_phone.trim()}) 创建设备 ${equipment.name} 的预约，排队顺位 #${nextOrder + 1}`
-    )
+      ).run(
+        equipment_id,
+        operator.id,
+        operator.username,
+        `为 ${borrower_name.trim()}(${borrower_phone.trim()}) 创建设备 ${equipment.name} 的预约，排队顺位 #${nextOrder + 1}`
+      )
 
-    return db.prepare('SELECT * FROM reservations WHERE id = ?').get(insertResult.lastInsertRowid)
-  })()
+      return db.prepare('SELECT * FROM reservations WHERE id = ?').get(insertResult.lastInsertRowid)
+    })()
+  } catch (err: unknown) {
+    if (err instanceof Error && err.message === 'CONCURRENT_CHANGE') {
+      res.status(409).json({
+        success: false,
+        error: '设备状态在提交时已变更，请刷新后重试',
+        conflict: { type: 'equipment_status_changed' },
+      })
+      return
+    }
+    throw err
+  }
 
   res.status(201).json({ success: true, data: result })
 })
@@ -146,11 +211,17 @@ router.put('/:id/notify', authMiddleware, (req: Request, res: Response): void =>
     equipment_id: number
     borrower_name: string
     status: string
+    operator_id: number
     queue_order: number
   } | undefined
 
   if (!reservation) {
     res.status(404).json({ success: false, error: '预约记录不存在' })
+    return
+  }
+
+  if (operator.role !== 'admin' && reservation.operator_id !== operator.id) {
+    res.status(403).json({ success: false, error: '只能通知自己经手的预约' })
     return
   }
 
@@ -221,7 +292,7 @@ router.put('/:id/complete', authMiddleware, (req: Request, res: Response): void 
     return
   }
 
-  const equipment = db.prepare('SELECT name FROM equipments WHERE id = ?').get(reservation.equipment_id) as { name: string }
+  const equipment = db.prepare('SELECT name, status FROM equipments WHERE id = ?').get(reservation.equipment_id) as { name: string; status: string }
 
   const updated = db.transaction(() => {
     db.prepare(
@@ -238,6 +309,11 @@ router.put('/:id/complete', authMiddleware, (req: Request, res: Response): void 
       operator.username,
       `预约人 ${reservation.borrower_name} 已完成设备 ${equipment.name} 的取用`
     )
+
+    if (equipment.status === 'reserved') {
+      autoNotifyNextIfNeeded(reservation.equipment_id, operator.id, operator.username, equipment.name)
+      checkAndUpdateReservedEquipment(reservation.equipment_id)
+    }
 
     return db.prepare('SELECT * FROM reservations WHERE id = ?').get(id)
   })()
@@ -283,7 +359,8 @@ router.put('/:id/cancel', authMiddleware, (req: Request, res: Response): void =>
     return
   }
 
-  const equipment = db.prepare('SELECT name FROM equipments WHERE id = ?').get(reservation.equipment_id) as { name: string }
+  const equipment = db.prepare('SELECT name, status FROM equipments WHERE id = ?').get(reservation.equipment_id) as { name: string; status: string }
+  const wasNotified = reservation.status === 'notified'
 
   const updated = db.transaction(() => {
     db.prepare(
@@ -305,6 +382,12 @@ router.put('/:id/cancel', authMiddleware, (req: Request, res: Response): void =>
       operator.username,
       `取消 ${reservation.borrower_name} 对设备 ${equipment.name} 的预约${cancel_reason ? `，原因：${cancel_reason}` : ''}`
     )
+
+    if (equipment.status === 'reserved' && wasNotified) {
+      autoNotifyNextIfNeeded(reservation.equipment_id, operator.id, operator.username, equipment.name)
+    }
+
+    checkAndUpdateReservedEquipment(reservation.equipment_id)
 
     return db.prepare('SELECT * FROM reservations WHERE id = ?').get(id)
   })()

@@ -31,7 +31,7 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     type TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'available' CHECK(status IN ('available', 'borrowed', 'damaged', 'pending_confirm')),
+    status TEXT NOT NULL DEFAULT 'available' CHECK(status IN ('available', 'borrowed', 'reserved', 'damaged', 'pending_confirm')),
     deposit_amount REAL NOT NULL DEFAULT 0,
     notes TEXT DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
@@ -254,6 +254,28 @@ if (needMigrateLogs) {
       INSERT INTO view_operation_logs_new SELECT * FROM view_operation_logs;
       DROP TABLE view_operation_logs;
       ALTER TABLE view_operation_logs_new RENAME TO view_operation_logs;
+    `)
+  })
+  tx()
+}
+
+const equipStatusCheck = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='equipments'").get() as { sql: string } | undefined
+if (equipStatusCheck && !equipStatusCheck.sql.includes("'reserved'")) {
+  const tx = db.transaction(() => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS equipments_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        type TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'available' CHECK(status IN ('available', 'borrowed', 'reserved', 'damaged', 'pending_confirm')),
+        deposit_amount REAL NOT NULL DEFAULT 0,
+        notes TEXT DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+      );
+      INSERT INTO equipments_new SELECT * FROM equipments;
+      DROP TABLE equipments;
+      ALTER TABLE equipments_new RENAME TO equipments;
     `)
   })
   tx()

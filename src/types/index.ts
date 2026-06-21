@@ -8,7 +8,7 @@ export interface Equipment {
   id: number;
   name: string;
   type: string;
-  status: "available" | "borrowed" | "damaged" | "pending_confirm";
+  status: "available" | "borrowed" | "reserved" | "damaged" | "pending_confirm";
   deposit_amount: number;
   notes: string;
   created_at: string;

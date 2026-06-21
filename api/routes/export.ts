@@ -38,7 +38,7 @@ router.get('/equipments', authMiddleware, adminMiddleware, (req: Request, res: R
   const sql = 'SELECT * FROM equipments' + whereSql + ` ORDER BY ${sortBy} ${sortOrder}`
   const rows = db.prepare(sql).all(...params) as Record<string, unknown>[]
   const header = toCsvRow(['ID', '名称', '类型', '状态', '押金金额', '备注', '创建时间', '更新时间'])
-  const statusMap: Record<string, string> = { available: '可用', borrowed: '借出', damaged: '损坏', pending_confirm: '待确认' }
+  const statusMap: Record<string, string> = { available: '可用', borrowed: '借出', reserved: '已预约', damaged: '损坏', pending_confirm: '待确认' }
   const csvRows = rows.map(r => toCsvRow([
     r.id, r.name, r.type, statusMap[String(r.status)] || r.status,
     r.deposit_amount, r.notes, r.created_at, r.updated_at

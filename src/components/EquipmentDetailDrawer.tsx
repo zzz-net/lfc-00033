@@ -57,8 +57,13 @@ export default function EquipmentDetailDrawer({ detail, loading, onClose, onRefr
       setShowAddForm(false);
       setAddForm({ borrower_name: "", borrower_phone: "", expected_pickup_time: "", notes: "" });
       onRefresh?.();
-    } catch (err: unknown) {
-      toast(err instanceof Error ? err.message : "预约登记失败", "error");
+    } catch (err: any) {
+      if (err?.conflict) {
+        toast("设备状态在提交时已变更，请刷新后重试", "error");
+        onRefresh?.();
+      } else {
+        toast(err instanceof Error ? err.message : "预约登记失败", "error");
+      }
     } finally {
       setSubmitting(false);
     }
@@ -170,16 +175,24 @@ export default function EquipmentDetailDrawer({ detail, loading, onClose, onRefr
                 <h4 className="text-sm font-semibold text-gray-700">
                   预约排队 <span className="text-xs font-normal text-gray-400">({activeReservations.length} 人)</span>
                 </h4>
-                <button
-                  onClick={() => setShowAddForm(!showAddForm)}
-                  className="text-teal-700 hover:text-teal-900 text-sm font-medium flex items-center gap-1"
-                >
-                  <Plus className="w-4 h-4" />
-                  新增预约
-                </button>
+                {detail.equipment.status === "borrowed" && (
+                  <button
+                    onClick={() => setShowAddForm(!showAddForm)}
+                    className="text-teal-700 hover:text-teal-900 text-sm font-medium flex items-center gap-1"
+                  >
+                    <Plus className="w-4 h-4" />
+                    新增预约
+                  </button>
+                )}
               </div>
 
-              {showAddForm && (
+              {detail.equipment.status !== "borrowed" && activeReservations.length === 0 && (
+                <p className="text-xs text-amber-600 bg-amber-50 px-3 py-2 rounded-lg mb-3">
+                  仅「已借出」的设备可登记预约，当前设备状态为「{EQUIPMENT_STATUS_LABELS[detail.equipment.status]}」
+                </p>
+              )}
+
+              {showAddForm && detail.equipment.status === "borrowed" && (
                 <div className="bg-gray-50 rounded-lg p-4 mb-4 space-y-3">
                   <div>
                     <label className="block text-xs font-medium text-gray-600 mb-1">
