@@ -10,7 +10,10 @@
     "preview": "vite preview",
     "check": "tsc --noEmit",
     "server:dev": "nodemon",
-    "dev": "concurrently \"npm run client:dev\" \"npm run server:dev\""
+    "dev": "concurrently \"npm run client:dev\" \"npm run server:dev\"",
+    "test:offline": "tsx tests/offline-signoff-regression.ts",
+    "test:build": "node tests/build-and-entry-verify.mjs",
+    "test:all": "npm run test:build && npm run test:offline"
   },
   "dependencies": {
     "clsx": "^2.1.1",

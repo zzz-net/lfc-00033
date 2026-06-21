@@ -579,6 +579,8 @@ router.put('/:id/release-lock', authMiddleware, adminMiddleware, (req: Request, 
     version: number
     updated_at: string
     queue_order: number
+    operator_id: number
+    operator_name: string
   } | undefined
 
   if (!reservation) {
